@@ -1,0 +1,18 @@
+# Rede cabeada, Wi-Fi e NFS
+iproute2
+iputils-ping
+nfs-common
+curl
+wget
+network-manager
+network-manager-gnome
+wpasupplicant
+wireless-regdb
+rfkill
+
+# Firmware comum para hardware real; exige a area non-free-firmware.
+firmware-iwlwifi
+firmware-realtek
+firmware-atheros
+firmware-brcm80211
+

@@ -1,0 +1,7 @@
+# Diagnostico de hardware e rede
+pciutils
+usbutils
+lshw
+ethtool
+dnsutils
+

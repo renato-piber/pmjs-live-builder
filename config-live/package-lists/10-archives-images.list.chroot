@@ -1,0 +1,7 @@
+# Arquivos e imagens
+tar
+gzip
+zstd
+rsync
+squashfs-tools
+

@@ -1,0 +1,19 @@
+# Shell e ferramentas fundamentais
+bash
+coreutils
+findutils
+grep
+sed
+gawk
+util-linux
+procps
+sudo
+locales
+ca-certificates
+live-boot
+live-config
+live-tools
+user-setup
+keyboard-configuration
+eject
+systemd-sysv

@@ -1,0 +1,10 @@
+# Sessao MATE minima e funcional, sem a colecao de aplicativos extras.
+xserver-xorg
+lightdm
+lightdm-gtk-greeter
+libpam-systemd
+dbus-user-session
+mate-desktop-environment-core
+mate-terminal
+caja
+mate-polkit

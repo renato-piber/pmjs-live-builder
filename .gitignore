@@ -1,3 +1,6 @@
-/iso-base/*
+/output/*
+!/output/.gitkeep
 /work/*
-/overlay/*
+!/work/.gitkeep
+/logs/*
+!/logs/.gitkeep

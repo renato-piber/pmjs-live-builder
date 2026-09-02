@@ -1,0 +1,6 @@
+# Ferramentas usadas pelo Deploy para instalar boot BIOS e UEFI
+grub-pc-bin
+grub-efi-amd64-bin
+grub-common
+efibootmgr
+

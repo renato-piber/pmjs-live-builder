@@ -1,0 +1,9 @@
+# Filesystems, particionamento e diagnostico de disco
+btrfs-progs
+dosfstools
+parted
+e2fsprogs
+smartmontools
+gdisk
+ntfs-3g
+
