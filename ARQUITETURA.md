@@ -20,7 +20,7 @@ Live. Isso elimina o estado oculto tipico de remasterizacoes incrementais.
 ## Componentes
 
 - `config/live.conf`: nome, versao, arquitetura, identidade Live, suite, mirrors
-  e diretorios. E a configuracao central do projeto.
+  diretorios e politica de cache. E a configuracao central do projeto.
 - `config-live/package-lists/*.list.chroot`: pacotes instalados no filesystem
   Live, separados por responsabilidade.
 - `config-live/includes.chroot/`: arquivos copiados para a raiz da Live. A arvore
@@ -39,16 +39,29 @@ Live. Isso elimina o estado oculto tipico de remasterizacoes incrementais.
 inicio do log
    -> carregar/validar config
    -> preflight (root, HOST, ferramentas, espaco, repositorios)
-   -> limpar work/ com guardas
+   -> migrar cache nativo legado, se necessario
+   -> limpar work/ com guardas, preservando cache/
+   -> conectar work/cache -> cache/
    -> lb config em work/
    -> copiar config-live/ para work/config/
    -> lb build
-   -> validar ISO e boot records
+   -> validar ISO, boot records e executaveis no SquashFS
    -> copiar atomicamente para output/
    -> gerar SHA256SUMS e resumo no log
 ```
 
-`work/` e descartavel e pode conter chroot, caches e produto intermediario.
+`work/` e descartavel e contem chroot e produto intermediario.
+`cache/` persiste separadamente e contem os caches nativos de pacotes do
+`live-build` (`packages.bootstrap`, `packages.chroot` e `packages.binary`). O
+symlink `work/cache` existe apenas para integrar esse local persistente ao layout
+esperado pelo `live-build`.
+
+Indices APT nao persistem. No build normal, `CACHE_STAGES=bootstrap` permite
+reutilizar o bootstrap nativo; `--clean` remove esse e qualquer outro snapshot de
+estagio, preservando `packages.*` e outros dados de cache que nao sejam snapshots
+para a proxima construcao. O cache reduz downloads sem substituir a resolucao e
+validacao atual do APT.
+
 `output/` recebe somente a ISO depois de um build e smoke test bem-sucedidos.
 Falhas de preflight tambem sao gravadas em `logs/`; a saida do `live-build` nao e
 suprimida.
@@ -64,10 +77,15 @@ O smoke test confirma que a estrutura produzida declara entradas El Torito para
 BIOS e UEFI e contem `/live/filesystem.squashfs`. Validacao definitiva exige boot
 em VM e em hardware UEFI/Legacy.
 
+Apos o build, `unsquashfs -ll` consulta somente os metadados do SquashFS
+intermediario e confirma Python 3 e os executaveis criticos de arquivo, disco,
+boot, SSH, NFS e rede. Nao ha mount temporario a desmontar.
+
 ## Seguranca e dados externos
 
 Somente arquivos dentro de `config-live/includes.chroot` entram por include. Nao
 ha varredura de `/home`, importacao automatica de outros repositorios nem leitura
 de credenciais. O clean resolve e valida seu alvo e recusa symlinks, caminhos fora
-de `work/` e diretorios com mounts ativos.
-
+de `work/` e diretorios com mounts ativos. A mesma politica protege `cache/`.
+`--clean` remove estado e snapshots, preservando downloads `.deb`; `--purge`
+remove estado e todo o conteudo do cache, sem usar `rm -rf`.

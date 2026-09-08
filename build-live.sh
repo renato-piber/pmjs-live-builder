@@ -16,13 +16,16 @@ source "${PROJECT_ROOT}/lib/build.sh"
 CURRENT_STAGE='inicializacao'
 START_EPOCH=$(date +%s)
 RUN_RESULT='falha'
+CLI_MODE='build'
+CLI_SMOKE_PATH=''
 
 usage() {
     cat <<'USAGE'
 Uso:
   sudo ./build-live.sh                 Constroi e publica a ISO
   sudo ./build-live.sh --preflight     Executa somente as verificacoes
-  sudo ./build-live.sh --clean         Limpa apenas a area work/ com protecoes
+  sudo ./build-live.sh --clean         Limpa work/ e preserva cache/
+  sudo ./build-live.sh --purge         Limpa work/ e tambem todo o cache/
        ./build-live.sh --smoke-test [ISO]
                                        Inspeciona uma ISO ja construida
        ./build-live.sh --help
@@ -43,38 +46,52 @@ handle_exit() {
     if (( status == 0 )); then
         RUN_RESULT='sucesso'
     fi
-    [[ -n "$LOG_FILE" ]] && log_info "Fim: resultado=${RUN_RESULT}; duracao=${duration}s"
+    if [[ -n "$LOG_FILE" ]]; then
+        [[ -n "${CACHE_DIR_ABS:-}" ]] && log_cache_metrics final
+        log_info "Fim: resultado=${RUN_RESULT}; duracao=${duration}s"
+    fi
+}
+
+parse_arguments() {
+    CLI_MODE='build'
+    CLI_SMOKE_PATH=''
+    if (( $# > 0 )); then
+        case "$1" in
+            --clean) CLI_MODE='clean' ;;
+            --purge) CLI_MODE='purge' ;;
+            --preflight) CLI_MODE='preflight' ;;
+            --smoke-test)
+                CLI_MODE='smoke'
+                CLI_SMOKE_PATH=${2:-}
+                (( $# <= 2 )) || { usage >&2; return 2; }
+                ;;
+            --help|-h) CLI_MODE='help' ;;
+            --version) CLI_MODE='version' ;;
+            *) usage >&2; return 2 ;;
+        esac
+        [[ "$CLI_MODE" == smoke ]] || (( $# == 1 )) || { usage >&2; return 2; }
+    fi
 }
 
 main() {
-    local mode='build' smoke_path=''
-    if (( $# > 0 )); then
-        case "$1" in
-            --clean) mode='clean' ;;
-            --preflight) mode='preflight' ;;
-            --smoke-test)
-                mode='smoke'
-                smoke_path=${2:-}
-                (( $# <= 2 )) || { usage >&2; return 2; }
-                ;;
-            --help|-h) usage; return 0 ;;
-            --version) tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION"; printf '\n'; return 0 ;;
-            *) usage >&2; return 2 ;;
-        esac
-        [[ "$mode" == smoke ]] || (( $# == 1 )) || { usage >&2; return 2; }
-    fi
+    parse_arguments "$@" || return $?
+    case "$CLI_MODE" in
+        help) usage; return 0 ;;
+        version) tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION"; printf '\n'; return 0 ;;
+    esac
 
     init_logging "${PROJECT_ROOT}/logs"
     trap 'handle_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
     trap handle_exit EXIT
-    log_info "Inicio do PMJS Live Builder; modo=$mode"
+    log_info "Inicio do PMJS Live Builder; modo=$CLI_MODE"
 
     CURRENT_STAGE='carregamento da configuracao'
     load_live_config "${PROJECT_ROOT}/config/live.conf"
     validate_config
     log_info "Versao: $LIVE_VERSION; suite: $DEBIAN_SUITE; arquitetura: $LIVE_ARCH"
+    log_info "Cache: habilitado=$CACHE_ENABLED; local=$CACHE_DIR_ABS; pacotes=$CACHE_PACKAGES; indices=$CACHE_INDICES"
 
-    case "$mode" in
+    case "$CLI_MODE" in
         build)
             CURRENT_STAGE='pipeline de build'
             run_build_pipeline
@@ -86,16 +103,21 @@ main() {
         clean)
             CURRENT_STAGE='clean'
             check_root
-            clean_workdir
+            clean_state_preserving_cache
+            ;;
+        purge)
+            CURRENT_STAGE='purge'
+            check_root
+            purge_builder_state
             ;;
         smoke)
             CURRENT_STAGE='smoke test'
-            if [[ -z "$smoke_path" ]]; then
-                smoke_path="${OUTPUT_DIR_ABS}/$(iso_filename)"
-            elif [[ "$smoke_path" != /* ]]; then
-                smoke_path="${PROJECT_ROOT}/${smoke_path}"
+            if [[ -z "$CLI_SMOKE_PATH" ]]; then
+                CLI_SMOKE_PATH="${OUTPUT_DIR_ABS}/$(iso_filename)"
+            elif [[ "$CLI_SMOKE_PATH" != /* ]]; then
+                CLI_SMOKE_PATH="${PROJECT_ROOT}/${CLI_SMOKE_PATH}"
             fi
-            smoke_test_iso "$smoke_path"
+            smoke_test_iso "$CLI_SMOKE_PATH"
             ;;
     esac
 }
@@ -103,4 +125,3 @@ main() {
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     main "$@"
 fi
-

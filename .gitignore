@@ -4,3 +4,4 @@
 !/work/.gitkeep
 /logs/*
 !/logs/.gitkeep
+/cache/

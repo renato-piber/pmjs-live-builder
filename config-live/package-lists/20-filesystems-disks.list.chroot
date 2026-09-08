@@ -1,4 +1,5 @@
 # Filesystems, particionamento e diagnostico de disco
+mount
 btrfs-progs
 dosfstools
 parted
@@ -6,4 +7,3 @@ e2fsprogs
 smartmontools
 gdisk
 ntfs-3g
-

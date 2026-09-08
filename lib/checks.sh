@@ -4,6 +4,7 @@ CONFIG_FILE=''
 OUTPUT_DIR_ABS=''
 WORK_DIR_ABS=''
 LOG_DIR_ABS=''
+CACHE_DIR_ABS=''
 
 die() {
     ui_error "$*"
@@ -32,6 +33,7 @@ load_live_config() {
     OUTPUT_DIR_ABS=$(resolve_project_path "$OUTPUT_DIR")
     WORK_DIR_ABS=$(resolve_project_path "$WORK_DIR")
     LOG_DIR_ABS=$(resolve_project_path "$LOG_DIR")
+    CACHE_DIR_ABS=$(resolve_project_path "$CACHE_DIR")
 }
 
 validate_project_child() {
@@ -61,7 +63,7 @@ validate_config() {
     required=(LIVE_NAME LIVE_VERSION LIVE_ARCH LIVE_USER LIVE_HOSTNAME
               LIVE_LOCALE LIVE_KEYBOARD_LAYOUT DEBIAN_SUITE DEBIAN_MIRROR
               DEBIAN_SECURITY_MIRROR ARCHIVE_AREAS OUTPUT_DIR WORK_DIR LOG_DIR
-              MIN_FREE_GIB)
+              CACHE_DIR CACHE_ENABLED CACHE_PACKAGES CACHE_INDICES MIN_FREE_GIB)
 
     for variable in "${required[@]}"; do
         [[ -n "${!variable:-}" ]] || die "Parametro obrigatorio vazio: $variable"
@@ -76,10 +78,18 @@ validate_config() {
     [[ "$MIN_FREE_GIB" =~ ^[0-9]+$ ]] && (( MIN_FREE_GIB > 0 )) || die "MIN_FREE_GIB deve ser inteiro positivo."
     [[ "$DEBIAN_MIRROR" == https://* ]] || die "DEBIAN_MIRROR deve usar HTTPS."
     [[ "$DEBIAN_SECURITY_MIRROR" == https://* ]] || die "DEBIAN_SECURITY_MIRROR deve usar HTTPS."
+    [[ "${CACHE_STAGES+x}" == x ]] || die "Parametro obrigatorio ausente: CACHE_STAGES"
+    [[ "$CACHE_ENABLED" == true ]] || die "CACHE_ENABLED deve permanecer true nesta Sprint."
+    [[ "$CACHE_PACKAGES" == true ]] || die "CACHE_PACKAGES deve permanecer true nesta Sprint."
+    [[ "$CACHE_INDICES" == false ]] || die "CACHE_INDICES deve permanecer false para atualizar e validar metadados APT."
+    [[ "$CACHE_STAGES" == bootstrap ]] || die "CACHE_STAGES deve ser bootstrap nesta Sprint."
 
     validate_project_child OUTPUT_DIR "$OUTPUT_DIR_ABS"
     validate_project_child WORK_DIR "$WORK_DIR_ABS"
     validate_project_child LOG_DIR "$LOG_DIR_ABS"
+    validate_project_child CACHE_DIR "$CACHE_DIR_ABS"
+    [[ "$CACHE_DIR_ABS" == "${PROJECT_ROOT}/cache" ]] || die "CACHE_DIR deve resolver exatamente para ${PROJECT_ROOT}/cache."
+    [[ "$CACHE_DIR_ABS" != "$WORK_DIR_ABS" ]] || die "CACHE_DIR e WORK_DIR devem ser separados."
 
     version_file=$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION")
     [[ "$version_file" == "$LIVE_VERSION" ]] || die "VERSION ($version_file) difere de LIVE_VERSION ($LIVE_VERSION)."
@@ -110,7 +120,7 @@ missing_commands() {
 
 check_required_commands() {
     local missing_output
-    if ! missing_output=$(missing_commands lb debootstrap xorriso mksquashfs sha256sum realpath findmnt); then
+    if ! missing_output=$(missing_commands lb debootstrap xorriso mksquashfs unsquashfs sha256sum realpath findmnt); then
         die "Dependencias ausentes no HOST: ${missing_output//$'\n'/, }. Instale: live-build debootstrap xorriso squashfs-tools."
     fi
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
@@ -170,6 +180,7 @@ run_preflight() {
     log_info "live-build: $lb_version"
     log_info "Configuracao: $CONFIG_FILE"
     log_info "Suite: $DEBIAN_SUITE; arquitetura: $LIVE_ARCH"
+    log_info "Cache: habilitado=$CACHE_ENABLED; pacotes=$CACHE_PACKAGES; indices=$CACHE_INDICES; local=$CACHE_DIR_ABS"
     if [[ "$host" != *"(${DEBIAN_SUITE})"* ]]; then
         ui_warn "HOST ($host) e alvo ($DEBIAN_SUITE) diferem. Prefira um HOST Debian $DEBIAN_SUITE para reduzir incompatibilidades de ferramentas."
         log_warn "HOST e suite alvo diferem."

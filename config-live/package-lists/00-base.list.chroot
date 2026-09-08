@@ -1,5 +1,6 @@
 # Shell e ferramentas fundamentais
 bash
+python3
 coreutils
 findutils
 grep
