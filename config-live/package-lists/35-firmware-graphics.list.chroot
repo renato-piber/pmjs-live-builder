@@ -1,0 +1,11 @@
+# Firmware grafico confirmado para a baseline amd64 Debian 13.
+# firmware-amd-graphics contem os blobs amdgpu/renoir_*.bin exigidos por Renoir.
+firmware-amd-graphics
+firmware-intel-graphics
+
+# Firmware DFSG pequeno para outros drivers mantidos pelo kernel Linux.
+firmware-linux-free
+
+# Microcodigo das duas familias de CPU usadas na frota amd64.
+amd64-microcode
+intel-microcode

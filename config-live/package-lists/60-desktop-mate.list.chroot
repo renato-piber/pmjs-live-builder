@@ -8,3 +8,8 @@ mate-desktop-environment-core
 mate-terminal
 caja
 mate-polkit
+libglib2.0-bin
+pluma
+filezilla
+gparted
+gnome-disk-utility

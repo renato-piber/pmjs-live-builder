@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=PMJS Image Builder
+Comment=Criar e publicar imagens de sistema PMJS
+Exec=pmjs-image-builder
+TryExec=pmjs-image-builder
+Icon=pmjs-image-builder
+Terminal=true
+Categories=System;
+Keywords=PMJS;imagem;captura;builder;
+StartupNotify=false

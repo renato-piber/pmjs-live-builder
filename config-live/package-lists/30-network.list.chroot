@@ -16,3 +16,8 @@ firmware-iwlwifi
 firmware-realtek
 firmware-atheros
 firmware-brcm80211
+firmware-mediatek
+
+# Ethernet que exige blobs fora dos drivers mais comuns sem firmware separado.
+firmware-intel-misc
+firmware-bnx2

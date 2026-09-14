@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+entrypoint=/opt/pmjs/image-builder/build-image.sh
+if [ ! -x "$entrypoint" ]; then
+    printf 'PMJS Image Builder nao esta instalado corretamente: %s\n' "$entrypoint" >&2
+    exit 127
+fi
+if [ "$(id -u)" -eq 0 ]; then
+    exec "$entrypoint" "$@"
+fi
+exec sudo -- "$entrypoint" "$@"

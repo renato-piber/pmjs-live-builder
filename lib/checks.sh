@@ -120,12 +120,110 @@ missing_commands() {
 
 check_required_commands() {
     local missing_output
-    if ! missing_output=$(missing_commands lb debootstrap xorriso mksquashfs unsquashfs sha256sum realpath findmnt); then
-        die "Dependencias ausentes no HOST: ${missing_output//$'\n'/, }. Instale: live-build debootstrap xorriso squashfs-tools."
+    if ! missing_output=$(missing_commands lb debootstrap xorriso mksquashfs unsquashfs \
+        sha256sum realpath findmnt desktop-file-validate file); then
+        die "Dependencias ausentes no HOST: ${missing_output//$'\n'/, }. Instale: live-build debootstrap xorriso squashfs-tools desktop-file-utils file."
     fi
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
         die "Preflight de rede requer curl ou wget no HOST."
     fi
+}
+
+check_package_list_duplicates() {
+    local duplicates
+    duplicates="$(awk '
+        /^[[:space:]]*(#|$)/ { next }
+        { count[$1]++ }
+        END { for (package in count) if (count[package] > 1) print package }
+    ' "${PROJECT_ROOT}"/config-live/package-lists/*.list.chroot | sort)"
+    [[ -z "${duplicates}" ]] || {
+        die "Pacotes duplicados nas listas: ${duplicates//$'\n'/, }"
+        return 1
+    }
+}
+
+check_embedded_pmjs_runtime() {
+    local include_root="${PROJECT_ROOT}/config-live/includes.chroot"
+    local path forbidden
+    local -a required_paths=(
+        opt/pmjs/deploy/VERSION
+        opt/pmjs/deploy/SNAPSHOT
+        opt/pmjs/deploy/deploy.sh
+        opt/pmjs/deploy/config/deploy.conf
+        opt/pmjs/deploy/assets/auto-mirror-x11
+        opt/pmjs/deploy/lib/image_contract.sh
+        opt/pmjs/deploy/lib/install.sh
+        opt/pmjs/image-builder/VERSION
+        opt/pmjs/image-builder/SNAPSHOT
+        opt/pmjs/image-builder/build-image.sh
+        opt/pmjs/image-builder/publish-image.sh
+        opt/pmjs/image-builder/sync-image-to-ventoy.sh
+        opt/pmjs/image-builder/config/image.conf
+        opt/pmjs/image-builder/lib/archive.sh
+        opt/pmjs/image-builder/lib/metadata.sh
+        usr/local/bin/pmjs-deploy
+        usr/local/bin/pmjs-image-builder
+        usr/share/applications/pmjs-deploy.desktop
+        usr/share/applications/pmjs-image-builder.desktop
+        usr/share/pixmaps/pmjs-deploy.png
+        usr/share/pixmaps/pmjs-image-builder.png
+        usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg
+        usr/share/glib-2.0/schemas/90_pmjs-live.gschema.override
+    )
+
+    for path in "${required_paths[@]}"; do
+        [[ -f "${include_root}/${path}" && -s "${include_root}/${path}" ]] || {
+            die "Arquivo integrado ausente ou vazio: ${path}"
+            return 1
+        }
+    done
+    for path in \
+        opt/pmjs/deploy/deploy.sh \
+        opt/pmjs/deploy/assets/auto-mirror-x11 \
+        opt/pmjs/image-builder/build-image.sh \
+        opt/pmjs/image-builder/publish-image.sh \
+        opt/pmjs/image-builder/sync-image-to-ventoy.sh \
+        usr/local/bin/pmjs-deploy \
+        usr/local/bin/pmjs-image-builder; do
+        [[ -x "${include_root}/${path}" ]] || {
+            die "Executavel integrado sem permissao de execucao: ${path}"
+            return 1
+        }
+    done
+
+    [[ "$(readlink -- "${include_root}/etc/skel/Desktop/PMJS Deploy.desktop")" == \
+       /usr/share/applications/pmjs-deploy.desktop ]] || {
+        die "Atalho do Desktop para PMJS Deploy ausente ou incorreto."
+        return 1
+    }
+    [[ "$(readlink -- "${include_root}/etc/skel/Desktop/PMJS Image Builder.desktop")" == \
+       /usr/share/applications/pmjs-image-builder.desktop ]] || {
+        die "Atalho do Desktop para PMJS Image Builder ausente ou incorreto."
+        return 1
+    }
+    desktop-file-validate \
+        "${include_root}/usr/share/applications/pmjs-deploy.desktop" \
+        "${include_root}/usr/share/applications/pmjs-image-builder.desktop" || {
+        die "Launcher .desktop invalido."
+        return 1
+    }
+    [[ "$(file --brief --mime-type -- "${include_root}/usr/share/pixmaps/pmjs-deploy.png")" == image/png &&
+       "$(file --brief --mime-type -- "${include_root}/usr/share/pixmaps/pmjs-image-builder.png")" == image/png &&
+       "$(file --brief --mime-type -- "${include_root}/usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg")" == image/jpeg ]] || {
+        die "Formato invalido em um dos assets PMJS integrados."
+        return 1
+    }
+
+    forbidden="$(find "${include_root}/opt/pmjs/deploy" \
+        "${include_root}/opt/pmjs/image-builder" \
+        \( -name .git -o -name logs -o -name cache -o -name output -o \
+           -name work -o -name tests -o -name '*.partial' -o \
+           -name 'rootfs.tar.*' -o -name 'homefs.tar.*' -o \
+           -name 'pmjs-linux-*' -o -size +20M \) -print -quit)"
+    [[ -z "${forbidden}" ]] || {
+        die "Artefato de desenvolvimento ou arquivo grande no snapshot: ${forbidden}"
+        return 1
+    }
 }
 
 check_root() {
@@ -163,6 +261,8 @@ check_project_structure() {
     [[ -d "${PROJECT_ROOT}/config-live/includes.chroot" ]] || die "Diretorio de includes ausente."
     [[ -d "${PROJECT_ROOT}/config-live/hooks" ]] || die "Diretorio de hooks ausente."
     find "${PROJECT_ROOT}/config-live/package-lists" -maxdepth 1 -type f -name '*.list.chroot' | grep -q . || die "Nenhuma package list .list.chroot encontrada."
+    check_package_list_duplicates
+    check_embedded_pmjs_runtime
 }
 
 run_preflight() {

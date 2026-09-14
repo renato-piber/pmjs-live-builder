@@ -5,17 +5,19 @@ ecossistema PMJS. O projeto (configuracao, listas de pacotes, includes e hooks) 
 a fonte da verdade; a ISO em `output/` e um artefato descartavel. Nao ha
 remasterizacao incremental de uma ISO anterior e nenhum `/home` do HOST e copiado.
 
-## Escopo das Sprints 1 e 1.1
+## Escopo atual
 
 A imagem e `amd64`, usa o usuario Live `usuario`, hostname `pmjs-live`, sessao
 grafica MATE, terminal, NetworkManager, NFS, Python 3, ferramentas de
-disco/imagem e zstd.
+disco/imagem e zstd. A Fase 4 incorpora snapshots runtime controlados do PMJS
+Deploy e PMJS Image Builder, wrappers de terminal, launchers MATE, branding
+institucional e uma baseline explicita de firmware para hardware real.
 O `live-build` gera uma ISO hibrida com GRUB para UEFI e Legacy BIOS. Secure Boot
 fica em modo `auto`: a disponibilidade de binarios assinados e validada durante o
 build, mas nao e uma garantia desta Sprint.
 
-Branding, Plymouth, wallpaper, navegador, launcher, menu PMJS, autostart e a incorporacao
-real de PMJS Deploy/Image Builder ficaram deliberadamente fora desta Sprint.
+Plymouth, navegador e autostart nao fazem parte desta fase. O fluxo de build,
+LightDM, Xorg, kernel e boot nao recebeu contornos especificos para hardware.
 
 ## Suite Debian
 
@@ -41,7 +43,7 @@ Em um HOST Debian 13:
 
 ```bash
 sudo apt update
-sudo apt install live-build debootstrap xorriso squashfs-tools curl ca-certificates
+sudo apt install live-build debootstrap xorriso squashfs-tools curl ca-certificates desktop-file-utils file
 ```
 
 O build requer root, pelo menos 20 GiB livres (ajustavel em `config/live.conf`) e
@@ -145,8 +147,8 @@ Smoke test de uma ISO existente:
 ```
 
 Durante um build, o Builder tambem inspeciona o SquashFS intermediario com
-`unsquashfs -ll` e exige `/usr/bin/python3` e os demais executaveis PMJS
-auditados, sem montar ou extrair a imagem. O smoke test da ISO verifica o
+`unsquashfs -ll` e exige ferramentas auditadas, aplicativos PMJS, launchers,
+assets e firmware Renoir, sem montar ou extrair a imagem. O smoke test da ISO verifica o
 SquashFS e registros El Torito BIOS/UEFI; nenhum desses testes prova que a imagem
 inicia em todo firmware. Para Ventoy, instale o Ventoy em um pendrive por seu
 procedimento oficial, copie a ISO e selecione-a no menu de boot. Teste depois em:
@@ -166,9 +168,12 @@ LightDM, terminal e integracao do NetworkManager. `--apt-recommends false` evita
 colecao ampla de aplicativos sugeridos; as dependencias necessarias sao listadas
 explicitamente por categoria em `config-live/package-lists/`.
 
-Firmware comum Intel, Realtek, Atheros e Broadcom foi incluido pela area Debian
-`non-free-firmware` para melhorar a chance de rede em hardware real. Nenhuma
-credencial, senha real, chave SSH ou configuracao NFS e incorporada.
+Firmware de grafico AMD/Intel e de rede Intel, Realtek, Atheros, Broadcom e
+MediaTek foi incluido pela area Debian `non-free-firmware`; a baseline tambem
+inclui o pequeno pacote DFSG `firmware-linux-free`. A receita exige
+explicitamente os blobs AMD Renoir que faltavam no boot real. Nenhuma credencial,
+senha real ou chave SSH e incorporada; as configuracoes operacionais dos
+aplicativos fazem parte de seus snapshots runtime.
 
 ## Dependencias de runtime PMJS
 
@@ -196,6 +201,11 @@ esperadas pelo PMJS Deploy e PMJS Image Builder:
 | `curl`, `wget` | `curl`, `wget` |
 | `ip`, `ping` | `iproute2`, `iputils-ping` |
 | `smartctl` | `smartmontools` |
+| `nvme` | `nvme-cli` |
+| `testdisk` | `testdisk` |
+| `ddrescue` | `gddrescue` |
+| `jq` | `jq` |
+| `pluma`, `filezilla`, `gparted`, `gnome-disks` | `pluma`, `filezilla`, `gparted`, `gnome-disk-utility` |
 
 No Sprint 1.1 foram acrescentados diretamente `python3`, `mount`,
 `grub2-common` e `openssh-client`; os demais ja estavam declarados. Isso evita
@@ -203,11 +213,30 @@ depender de instalacoes indiretas que podem mudar com o grafo de dependencias.
 
 ## PMJS Deploy e Image Builder
 
-`config-live/includes.chroot/opt/pmjs/` e o ponto versionado de inclusao. O hook
-cria `/opt/pmjs/deploy` e `/opt/pmjs/image-builder`, mas esta Sprint nao inventa
-executaveis nem copia diretorios externos. Quando os projetos reais forem
-fornecidos de forma explicita, seus arquivos e launchers `pmjs-deploy` e
-`pmjs-image-builder` poderao ser adicionados ali em uma Sprint posterior.
+`config-live/includes.chroot/opt/pmjs/` contem snapshots runtime versionados, nao
+checkouts completos. A ISO e construida somente a partir desta arvore e continua
+independente da presenca dos projetos irmaos e de `../images`.
+
+Antes de construir uma release, atualize os snapshots deliberadamente:
+
+```bash
+./tools/update-pmjs-snapshots.sh
+```
+
+O atualizador possui uma lista fechada de entrypoints, configuracoes, assets e
+bibliotecas necessarias; grava versao/commit em `SNAPSHOT`, valida em staging e
+troca por rename. Testes, `.git`, logs, caches, workdirs e imagens grandes nao
+entram. Consulte `docs/PHASE4_INTEGRATION.md` para a auditoria completa e o modo
+de informar checkouts em outros caminhos.
+
+Na Live, execute `pmjs-deploy` ou `pmjs-image-builder` de qualquer diretorio. Os
+wrappers chamam `/opt/pmjs/...` por caminho absoluto, abrem em terminal pelos
+launchers do MATE e usam o `sudo` normal quando necessitam privilegios. Nao ha
+regra `NOPASSWD` ou wrapper com logica de negocio duplicada.
+
+Os launchers aparecem no menu MATE e na Area de Trabalho. Icones e wallpaper
+foram copiados para a propria receita Live; nenhum path externo e necessario no
+build.
 
 ## Nota sobre reproducibilidade
 

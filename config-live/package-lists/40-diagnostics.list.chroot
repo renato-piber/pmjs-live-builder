@@ -4,4 +4,7 @@ usbutils
 lshw
 ethtool
 dnsutils
-
+nvme-cli
+testdisk
+gddrescue
+jq

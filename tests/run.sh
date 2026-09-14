@@ -15,6 +15,9 @@ source "${PROJECT_ROOT}/lib/build.sh"
 # Carrega tambem o parser CLI; main nao e executado quando o arquivo e sourced.
 # shellcheck source=../build-live.sh
 source "${PROJECT_ROOT}/build-live.sh"
+# O atualizador expoe as listas controladas quando carregado como biblioteca.
+# shellcheck source=../tools/update-pmjs-snapshots.sh
+source "${PROJECT_ROOT}/tools/update-pmjs-snapshots.sh"
 
 tests_run=0
 tests_failed=0
@@ -194,7 +197,7 @@ test_argument_parsing() {
 }
 
 test_package_lists() {
-    local package all_lists
+    local package all_lists duplicates
     local -a required=(
         bash python3 coreutils findutils grep sed gawk util-linux mount procps sudo
         tar gzip zstd rsync btrfs-progs dosfstools parted e2fsprogs
@@ -203,6 +206,11 @@ test_package_lists() {
         grub-common grub2-common efibootmgr live-config live-tools user-setup
         keyboard-configuration xserver-xorg lightdm libpam-systemd
         mate-desktop-environment-core mate-terminal caja network-manager
+        pluma filezilla gparted gnome-disk-utility nvme-cli testdisk gddrescue jq
+        firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211
+        firmware-mediatek firmware-intel-misc firmware-bnx2
+        firmware-amd-graphics firmware-intel-graphics firmware-linux-free
+        amd64-microcode intel-microcode
     )
     all_lists=$(find "${PROJECT_ROOT}/config-live/package-lists" -maxdepth 1 -type f -name '*.list.chroot' -print | sort)
     [[ -n "$all_lists" ]]
@@ -212,6 +220,15 @@ test_package_lists() {
             return 1
         }
     done
+    duplicates=$(awk '
+        /^[[:space:]]*(#|$)/ { next }
+        { count[$1]++ }
+        END { for (package in count) if (count[package] > 1) print package }
+    ' $all_lists)
+    [[ -z "$duplicates" ]] || {
+        printf 'Pacotes duplicados: %s\n' "$duplicates"
+        return 1
+    }
 }
 
 test_project_structure() {
@@ -220,12 +237,78 @@ test_project_structure() {
     [[ -x "${PROJECT_ROOT}/config-live/hooks/live/010-pmjs-baseline.hook.chroot" ]]
 }
 
+assert_snapshot_file_set() {
+    local snapshot=$1 files_name=$2
+    local -n expected_files=$files_name
+    diff -u \
+        <(printf '%s\n' "${expected_files[@]}" | sort) \
+        <(cd "$snapshot" && find . -type f ! -name SNAPSHOT -printf '%P\n' | sort)
+}
+
+test_controlled_snapshots() {
+    local deploy="${PROJECT_ROOT}/config-live/includes.chroot/opt/pmjs/deploy"
+    local image_builder="${PROJECT_ROOT}/config-live/includes.chroot/opt/pmjs/image-builder"
+    local forbidden
+
+    assert_snapshot_file_set "$deploy" DEPLOY_RUNTIME_FILES
+    assert_snapshot_file_set "$image_builder" IMAGE_BUILDER_RUNTIME_FILES
+    grep -Eq '^version=2\.0\.0-dev$' "$deploy/SNAPSHOT"
+    grep -Eq '^version=0\.2\.0$' "$image_builder/SNAPSHOT"
+    grep -Eq '^source_commit=[0-9a-f]{40}$' "$deploy/SNAPSHOT"
+    grep -Eq '^source_commit=[0-9a-f]{40}$' "$image_builder/SNAPSHOT"
+    forbidden=$(find "$deploy" "$image_builder" \
+        \( -name .git -o -name logs -o -name cache -o -name output -o \
+           -name work -o -name tests -o -name '*.partial' -o \
+           -name 'rootfs.tar.*' -o -name 'homefs.tar.*' -o \
+           -name 'pmjs-linux-*' -o -size +20M \) -print -quit)
+    [[ -z "$forbidden" ]]
+}
+
+test_wrappers_and_launchers() {
+    local include="${PROJECT_ROOT}/config-live/includes.chroot"
+    local wrapper desktop
+    for wrapper in pmjs-deploy pmjs-image-builder; do
+        [[ -x "$include/usr/local/bin/$wrapper" ]]
+        sh -n "$include/usr/local/bin/$wrapper"
+        grep -Fq 'exec sudo -- "$entrypoint" "$@"' "$include/usr/local/bin/$wrapper"
+        ! grep -Eq 'NOPASSWD|pkexec|sudoers' "$include/usr/local/bin/$wrapper"
+    done
+    for desktop in pmjs-deploy pmjs-image-builder; do
+        [[ -x "$include/usr/share/applications/$desktop.desktop" ]]
+        desktop-file-validate "$include/usr/share/applications/$desktop.desktop"
+        grep -Eq "^Exec=${desktop}$" "$include/usr/share/applications/$desktop.desktop"
+        grep -Eq "^TryExec=${desktop}$" "$include/usr/share/applications/$desktop.desktop"
+        grep -Eq "^Icon=${desktop}$" "$include/usr/share/applications/$desktop.desktop"
+        grep -Eq '^Terminal=true$' "$include/usr/share/applications/$desktop.desktop"
+    done
+    [[ "$(readlink -- "$include/etc/skel/Desktop/PMJS Deploy.desktop")" == \
+       /usr/share/applications/pmjs-deploy.desktop ]]
+    [[ "$(readlink -- "$include/etc/skel/Desktop/PMJS Image Builder.desktop")" == \
+       /usr/share/applications/pmjs-image-builder.desktop ]]
+}
+
+test_branding_and_renoir_recipe() {
+    local include="${PROJECT_ROOT}/config-live/includes.chroot"
+    [[ "$(file -b --mime-type "$include/usr/share/pixmaps/pmjs-deploy.png")" == image/png ]]
+    [[ "$(file -b --mime-type "$include/usr/share/pixmaps/pmjs-image-builder.png")" == image/png ]]
+    [[ "$(file -b --mime-type "$include/usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg")" == image/jpeg ]]
+    grep -Fq "picture-filename='/usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg'" \
+        "$include/usr/share/glib-2.0/schemas/90_pmjs-live.gschema.override"
+    grep -Fq 'firmware-amd-graphics' \
+        "${PROJECT_ROOT}/config-live/package-lists/35-firmware-graphics.list.chroot"
+    for firmware in renoir_asd.bin renoir_dmcub.bin renoir_pfp.bin renoir_sdma.bin renoir_vcn.bin; do
+        grep -Fq "usr/lib/firmware/amdgpu/$firmware" "${PROJECT_ROOT}/lib/build.sh"
+    done
+}
+
 test_shell_syntax() {
     local file
     while IFS= read -r file; do
         bash -n "$file" || return 1
     done < <(find "$PROJECT_ROOT" \( -path "$PROJECT_ROOT/work" -o -path "$PROJECT_ROOT/cache" \) -prune -o -type f -name '*.sh' -print)
     sh -n "${PROJECT_ROOT}/config-live/hooks/live/010-pmjs-baseline.hook.chroot"
+    sh -n "${PROJECT_ROOT}/config-live/includes.chroot/usr/local/bin/pmjs-deploy"
+    sh -n "${PROJECT_ROOT}/config-live/includes.chroot/usr/local/bin/pmjs-image-builder"
 }
 
 test_preflight_components() {
@@ -270,6 +353,9 @@ run_test 'protecao contra symlinks' test_symlink_protection
 run_test 'parsing das novas opcoes CLI' test_argument_parsing
 run_test 'estrutura e conteudo das package lists' test_package_lists
 run_test 'estrutura de includes e hooks' test_project_structure
+run_test 'snapshots runtime controlados e sem artefatos' test_controlled_snapshots
+run_test 'wrappers e launchers graficos' test_wrappers_and_launchers
+run_test 'branding e receita de firmware Renoir' test_branding_and_renoir_recipe
 run_test 'sintaxe dos scripts e hook' test_shell_syntax
 run_test 'componentes nao destrutivos do preflight' test_preflight_components
 run_test 'opcoes criticas do live-build' test_live_build_options

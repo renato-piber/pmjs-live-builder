@@ -1,9 +1,32 @@
 #!/bin/sh
 set -eu
 
-# Reserva os destinos sem copiar dados do host e garante boot grafico/rede.
-install -d -m 0755 /opt/pmjs/deploy /opt/pmjs/image-builder
+# Confirma os snapshots versionados, launchers e branding antes de concluir a
+# configuracao da sessao. Nenhum projeto externo e lido dentro do chroot.
+test -x /opt/pmjs/deploy/deploy.sh
+test -x /opt/pmjs/image-builder/build-image.sh
+test -x /usr/local/bin/pmjs-deploy
+test -x /usr/local/bin/pmjs-image-builder
+test -f /usr/share/applications/pmjs-deploy.desktop
+test -f /usr/share/applications/pmjs-image-builder.desktop
+test -f /usr/share/pixmaps/pmjs-deploy.png
+test -f /usr/share/pixmaps/pmjs-image-builder.png
+test -f /usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg
+
+chmod 0755 /opt/pmjs/deploy/deploy.sh \
+    /opt/pmjs/deploy/assets/auto-mirror-x11 \
+    /opt/pmjs/image-builder/build-image.sh \
+    /opt/pmjs/image-builder/publish-image.sh \
+    /opt/pmjs/image-builder/sync-image-to-ventoy.sh \
+    /usr/local/bin/pmjs-deploy /usr/local/bin/pmjs-image-builder \
+    /usr/share/applications/pmjs-deploy.desktop \
+    /usr/share/applications/pmjs-image-builder.desktop
+chmod 0644 /usr/share/pixmaps/pmjs-deploy.png \
+    /usr/share/pixmaps/pmjs-image-builder.png \
+    /usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg \
+    /usr/share/glib-2.0/schemas/90_pmjs-live.gschema.override
+glib-compile-schemas /usr/share/glib-2.0/schemas
+
 systemctl enable NetworkManager.service
 systemctl enable lightdm.service
 systemctl set-default graphical.target
-

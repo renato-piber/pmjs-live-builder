@@ -1,0 +1,266 @@
+#!/bin/bash
+
+# Espelha automaticamente duas saídas conectadas em uma sessão X11.
+# Falhas são registradas, mas nunca devem impedir o login do usuário.
+
+set -u
+set -o pipefail
+export LC_ALL=C
+
+STATE_DIR="${XDG_STATE_HOME:-${HOME:-}/.local/state}/pmjs-deploy"
+LOG_FILE="$STATE_DIR/projecao.log"
+XRANDR_BIN=""
+
+projection_prepare_log() {
+    if [ -z "${HOME:-}" ] || ! mkdir -p -- "$STATE_DIR" 2>/dev/null; then
+        LOG_FILE="/dev/null"
+        return
+    fi
+    touch -- "$LOG_FILE" 2>/dev/null || LOG_FILE="/dev/null"
+}
+
+projection_log() {
+    local level="$1"
+    shift
+    printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$*" >> "$LOG_FILE"
+}
+
+projection_query() {
+    local output_file="$1"
+    local error_file="$2"
+
+    "$XRANDR_BIN" --query >"$output_file" 2>"$error_file"
+}
+
+projection_log_error_file() {
+    local prefix="$1"
+    local error_file="$2"
+    local line=""
+
+    if [ -s "$error_file" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            projection_log ERROR "$prefix: $line"
+        done < "$error_file"
+    fi
+}
+
+projection_connected_outputs() {
+    local query_file="$1"
+
+    awk '$2 == "connected" { print $1 }' "$query_file"
+}
+
+projection_output_is_active() {
+    local query_file="$1"
+    local output="$2"
+
+    awk -v wanted="$output" '
+        $1 == wanted && $2 == "connected" {
+            for (i = 3; i <= NF; i++) {
+                if ($i ~ /^[0-9]+x[0-9]+\+[0-9-]+\+[0-9-]+/) {
+                    found=1
+                }
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$query_file"
+}
+
+projection_modes_for_output() {
+    local query_file="$1"
+    local output="$2"
+
+    awk -v wanted="$output" '
+        /^[^[:space:]]/ {
+            in_output=($1 == wanted && $2 == "connected")
+            next
+        }
+        in_output && $1 ~ /^[0-9]+x[0-9]+([iIpP])?$/ {
+            print $1
+        }
+    ' "$query_file" | sort -u
+}
+
+projection_select_best_common_mode() {
+    local query_file="$1"
+    local reference="$2"
+    local secondary="$3"
+    local first_modes=""
+    local second_modes=""
+
+    first_modes=$(mktemp "${TMPDIR:-/tmp}/pmjs-modes-first.XXXXXX") || return 1
+    second_modes=$(mktemp "${TMPDIR:-/tmp}/pmjs-modes-second.XXXXXX") || {
+        rm -f -- "$first_modes"
+        return 1
+    }
+
+    projection_modes_for_output "$query_file" "$reference" > "$first_modes"
+    projection_modes_for_output "$query_file" "$secondary" > "$second_modes"
+
+    comm -12 "$first_modes" "$second_modes" |
+        awk '
+            /^[0-9]+x[0-9]+/ {
+                split($0, size, "x")
+                height=size[2]
+                sub(/[^0-9].*$/, "", height)
+                print (size[1] * height), size[1], height, $0
+            }
+        ' |
+        sort -k1,1nr -k2,2nr -k3,3nr -k4,4 |
+        awk 'NR == 1 { print $4 }'
+
+    rm -f -- "$first_modes" "$second_modes"
+}
+
+projection_verify_mirror() {
+    local reference="$1"
+    local secondary="$2"
+    local query_file="$3"
+    local error_file="$4"
+
+    if ! projection_query "$query_file" "$error_file"; then
+        projection_log_error_file "Falha ao verificar a configuração" "$error_file"
+        return 1
+    fi
+    if ! projection_output_is_active "$query_file" "$reference" ||
+       ! projection_output_is_active "$query_file" "$secondary"; then
+        projection_log ERROR "A verificação não confirmou as duas saídas conectadas e ativas."
+        return 1
+    fi
+    return 0
+}
+
+projection_main() {
+    local query_file=""
+    local error_file=""
+    local attempt=0
+    local status=0
+    local reference=""
+    local secondary=""
+    local primary=""
+    local common_mode=""
+    local common_modes=""
+    local -a connected=()
+    local -a command=()
+
+    projection_prepare_log
+    projection_log INFO "Início da configuração; sessão=${XDG_SESSION_TYPE:-não definida}; DISPLAY=${DISPLAY:-não definido}."
+
+    if [ "${XDG_SESSION_TYPE:-}" != "x11" ]; then
+        projection_log INFO "Sessão não X11; espelhamento automático por xrandr não é suportado. Nenhuma alteração aplicada."
+        return 0
+    fi
+    if [ -z "${DISPLAY:-}" ]; then
+        projection_log ERROR "DISPLAY não está definido. Nenhuma alteração aplicada."
+        return 0
+    fi
+
+    XRANDR_BIN=$(command -v xrandr 2>/dev/null || true)
+    if [ -z "$XRANDR_BIN" ]; then
+        projection_log ERROR "Comando xrandr não encontrado; verifique o pacote x11-xserver-utils."
+        return 0
+    fi
+
+    query_file=$(mktemp "${TMPDIR:-/tmp}/pmjs-xrandr-query.XXXXXX") || {
+        projection_log ERROR "Não foi possível criar arquivo temporário para xrandr."
+        return 0
+    }
+    error_file=$(mktemp "${TMPDIR:-/tmp}/pmjs-xrandr-error.XXXXXX") || {
+        projection_log ERROR "Não foi possível criar arquivo temporário para stderr do xrandr."
+        rm -f -- "$query_file"
+        return 0
+    }
+    trap "rm -f -- '$query_file' '$error_file'" EXIT
+
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        projection_log INFO "Tentativa $attempt de 10 para consultar o RandR."
+        : > "$error_file"
+        if projection_query "$query_file" "$error_file"; then
+            status=0
+            break
+        else
+            status=$?
+        fi
+        projection_log_error_file "xrandr --query falhou na tentativa $attempt" "$error_file"
+        [ "$attempt" -lt 10 ] && sleep 2
+    done
+    if [ "$status" -ne 0 ]; then
+        projection_log ERROR "RandR permaneceu indisponível após 10 tentativas. Nenhuma alteração aplicada."
+        return 0
+    fi
+
+    mapfile -t connected < <(projection_connected_outputs "$query_file")
+    projection_log INFO "Saídas conectadas (${#connected[@]}): ${connected[*]:-nenhuma}."
+
+    case "${#connected[@]}" in
+        0)
+            projection_log INFO "Nenhuma saída conectada detectada. Nenhuma alteração aplicada."
+            return 0
+            ;;
+        1)
+            projection_log INFO "Somente uma saída conectada (${connected[0]}). Nenhuma alteração aplicada."
+            return 0
+            ;;
+        2)
+            ;;
+        *)
+            projection_log INFO "Três ou mais saídas conectadas; configuração ambígua. Nenhuma alteração aplicada."
+            return 0
+            ;;
+    esac
+
+    primary=$(awk '$2 == "connected" {
+        for (i=3; i<=NF; i++) if ($i == "primary") { print $1; exit }
+    }' "$query_file")
+    reference="${primary:-${connected[0]}}"
+    if [ "${connected[0]}" = "$reference" ]; then
+        secondary="${connected[1]}"
+    else
+        secondary="${connected[0]}"
+    fi
+    projection_log INFO "Saída de referência: $reference; saída secundária: $secondary."
+
+    command=("$XRANDR_BIN" --output "$reference" --auto --output "$secondary" --auto --same-as "$reference")
+    projection_log INFO "Aplicando espelhamento automático: xrandr --output '$reference' --auto --output '$secondary' --auto --same-as '$reference'."
+    : > "$error_file"
+    if "${command[@]}" 2>"$error_file"; then
+        if projection_verify_mirror "$reference" "$secondary" "$query_file" "$error_file"; then
+            projection_log INFO "Espelhamento com --auto aplicado e validado com sucesso."
+            return 0
+        fi
+    else
+        projection_log_error_file "Falha no comando de espelhamento com --auto" "$error_file"
+    fi
+    projection_log WARNING "A tentativa com --auto falhou ou não foi validada; procurando um modo comum."
+
+    mapfile -t common_modes < <(
+        comm -12 \
+            <(projection_modes_for_output "$query_file" "$reference") \
+            <(projection_modes_for_output "$query_file" "$secondary")
+    )
+    projection_log INFO "Modos comuns encontrados: ${common_modes[*]:-nenhum}."
+    common_mode=$(projection_select_best_common_mode "$query_file" "$reference" "$secondary")
+    if [ -z "$common_mode" ]; then
+        projection_log ERROR "Nenhum modo comum foi encontrado. Nenhuma nova alteração será tentada."
+        return 0
+    fi
+    projection_log INFO "Modo comum selecionado: $common_mode."
+
+    command=("$XRANDR_BIN" --output "$reference" --mode "$common_mode" --output "$secondary" --mode "$common_mode" --same-as "$reference")
+    projection_log INFO "Aplicando fallback: xrandr --output '$reference' --mode '$common_mode' --output '$secondary' --mode '$common_mode' --same-as '$reference'."
+    : > "$error_file"
+    if "${command[@]}" 2>"$error_file"; then
+        if projection_verify_mirror "$reference" "$secondary" "$query_file" "$error_file"; then
+            projection_log INFO "Fallback com o modo $common_mode aplicado e validado com sucesso."
+        else
+            projection_log ERROR "O fallback foi executado, mas a validação final falhou."
+        fi
+    else
+        projection_log_error_file "Falha no comando de fallback de resolução" "$error_file"
+    fi
+    projection_log INFO "A configuração automática terminou sem sucesso; o login continuará normalmente."
+    return 0
+}
+
+projection_main "$@"
+exit 0

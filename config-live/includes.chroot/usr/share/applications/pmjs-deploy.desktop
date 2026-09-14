@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=PMJS Deploy
+Comment=Implantar e manter computadores com imagens PMJS
+Exec=pmjs-deploy
+TryExec=pmjs-deploy
+Icon=pmjs-deploy
+Terminal=true
+Categories=System;
+Keywords=PMJS;deploy;imagem;instalacao;
+StartupNotify=false

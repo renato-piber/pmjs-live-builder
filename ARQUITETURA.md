@@ -9,8 +9,8 @@ Debian live-build + repositorios da suite trixie
         v
 PMJS Live ISO (artefato descartavel)
         |
-        +-- futuro: PMJS Deploy
-        `-- futuro: PMJS Image Builder
+        +-- /opt/pmjs/deploy (snapshot runtime)
+        `-- /opt/pmjs/image-builder (snapshot runtime)
 ```
 
 O Builder nunca usa a ISO anterior como entrada. A cada execucao ele cria uma
@@ -23,8 +23,8 @@ Live. Isso elimina o estado oculto tipico de remasterizacoes incrementais.
   diretorios e politica de cache. E a configuracao central do projeto.
 - `config-live/package-lists/*.list.chroot`: pacotes instalados no filesystem
   Live, separados por responsabilidade.
-- `config-live/includes.chroot/`: arquivos copiados para a raiz da Live. A arvore
-  `/opt/pmjs` esta reservada para componentes reais fornecidos futuramente.
+- `config-live/includes.chroot/`: aplicativos PMJS, wrappers, launchers e assets
+  copiados para a raiz da Live sem depender de caminhos externos no build.
 - `config-live/hooks/live/*.hook.chroot`: operacoes que precisam ocorrer dentro
   do chroot depois da instalacao dos pacotes.
 - `lib/checks.sh`: parsing, validacao, deteccao do HOST, dependencias, espaco e
@@ -32,13 +32,15 @@ Live. Isso elimina o estado oculto tipico de remasterizacoes incrementais.
 - `lib/build.sh`: workdir, chamada direta ao `live-build`, validacao e publicacao.
 - `lib/logs.sh` e `lib/ui.sh`: log iniciado antes do preflight e mensagens.
 - `tests/run.sh`: testes locais sem bootstrap Debian nem construcao integral.
+- `tools/update-pmjs-snapshots.sh`: atualizacao atomica e enumerada dos snapshots
+  runtime a partir dos dois repositorios de origem.
 
 ## Pipeline e fronteiras
 
 ```text
 inicio do log
    -> carregar/validar config
-   -> preflight (root, HOST, ferramentas, espaco, repositorios)
+   -> preflight (root, HOST, ferramentas, snapshots, assets, espaco, repositorios)
    -> migrar cache nativo legado, se necessario
    -> limpar work/ com guardas, preservando cache/
    -> conectar work/cache -> cache/
@@ -71,21 +73,29 @@ suprimida.
 `lb config` solicita `iso-hybrid` e os bootloaders `grub-pc` e `grub-efi`. Os
 parametros de boot entregues ao `live-config` definem `usuario`, `pmjs-live`,
 locale pt_BR e teclado brasileiro. LightDM inicia a sessao grafica MATE e o hook
-habilita LightDM/NetworkManager, sem branding ou autostart PMJS.
+habilita LightDM/NetworkManager. Um override GSettings configura o wallpaper
+institucional; launchers de sistema ficam no menu e, por links em `/etc/skel`,
+na Area de Trabalho.
 
 O smoke test confirma que a estrutura produzida declara entradas El Torito para
 BIOS e UEFI e contem `/live/filesystem.squashfs`. Validacao definitiva exige boot
 em VM e em hardware UEFI/Legacy.
 
 Apos o build, `unsquashfs -ll` consulta somente os metadados do SquashFS
-intermediario e confirma Python 3 e os executaveis criticos de arquivo, disco,
-boot, SSH, NFS e rede. Nao ha mount temporario a desmontar.
+intermediario e confirma ferramentas criticas, snapshots, wrappers, launchers,
+assets e os blobs AMD Renoir. Nao ha mount temporario a desmontar.
 
 ## Seguranca e dados externos
 
-Somente arquivos dentro de `config-live/includes.chroot` entram por include. Nao
-ha varredura de `/home`, importacao automatica de outros repositorios nem leitura
-de credenciais. O clean resolve e valida seu alvo e recusa symlinks, caminhos fora
+Somente arquivos dentro de `config-live/includes.chroot` entram por include. O
+build nao varre `/home`, nao importa repositorios irmaos e nao le credenciais. A
+atualizacao deliberada dos snapshots usa uma allowlist e registra versao/commit;
+testes, `.git`, caches e bundles sao recusados. O clean resolve e valida seu alvo e recusa symlinks, caminhos fora
 de `work/` e diretorios com mounts ativos. A mesma politica protege `cache/`.
 `--clean` remove estado e snapshots, preservando downloads `.deb`; `--purge`
 remove estado e todo o conteudo do cache, sem usar `rm -rf`.
+
+Os wrappers publicos usam caminhos absolutos e `exec`; usam o processo atual
+quando root ou a politica padrao de `sudo` quando nao root. Eles nao replicam
+regras de negocio do Deploy ou do Image Builder. A lista de arquivos e as
+decisoes de integracao estao detalhadas em `docs/PHASE4_INTEGRATION.md`.

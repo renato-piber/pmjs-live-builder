@@ -1,11 +1,12 @@
-# /opt/pmjs
+# Aplicativos PMJS integrados
 
-Ponto de inclusao reservado aos projetos PMJS.
+Esta imagem inclui snapshots runtime controlados de:
 
-- `deploy/`: futuro conteudo do PMJS Deploy;
-- `image-builder/`: futuro conteudo do PMJS Image Builder.
+- `deploy/`: PMJS Deploy; execute por `/usr/local/bin/pmjs-deploy`;
+- `image-builder/`: PMJS Image Builder; execute por
+  `/usr/local/bin/pmjs-image-builder`.
 
-Esta Sprint nao incorpora copias externas, launchers nem implementacoes ficticias.
-Quando os projetos forem versionados ou fornecidos explicitamente ao Builder, seus
-arquivos devem ser adicionados sob esta arvore de `includes.chroot`.
-
+Cada diretorio contem `VERSION` e `SNAPSHOT`, que registram a versao e o commit
+de origem. Os snapshots nao sao checkouts Git e nao incluem testes, logs, caches
+ou artefatos de imagem. Eles sao atualizados no repositorio do PMJS Live Builder
+por `tools/update-pmjs-snapshots.sh` antes da construcao da ISO.

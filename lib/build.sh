@@ -358,6 +358,39 @@ validate_live_filesystem() {
         usr/bin/ip
         usr/bin/ping
         usr/sbin/smartctl
+        usr/sbin/nvme
+        usr/bin/testdisk
+        usr/bin/ddrescue
+        usr/bin/jq
+        usr/bin/pluma
+        usr/bin/filezilla
+        usr/sbin/gparted
+        usr/bin/gnome-disks
+        usr/bin/timeout
+        usr/sbin/showmount
+        usr/sbin/blockdev
+        usr/sbin/mkfs.btrfs
+        usr/sbin/mkfs.ext4
+        usr/sbin/wipefs
+        usr/bin/udevadm
+        usr/local/bin/pmjs-deploy
+        usr/local/bin/pmjs-image-builder
+        opt/pmjs/deploy/deploy.sh
+        opt/pmjs/deploy/config/deploy.conf
+        opt/pmjs/deploy/lib/image_contract.sh
+        opt/pmjs/image-builder/build-image.sh
+        opt/pmjs/image-builder/config/image.conf
+        opt/pmjs/image-builder/lib/metadata.sh
+        usr/share/applications/pmjs-deploy.desktop
+        usr/share/applications/pmjs-image-builder.desktop
+        usr/share/pixmaps/pmjs-deploy.png
+        usr/share/pixmaps/pmjs-image-builder.png
+        usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg
+        usr/lib/firmware/amdgpu/renoir_asd.bin
+        usr/lib/firmware/amdgpu/renoir_dmcub.bin
+        usr/lib/firmware/amdgpu/renoir_pfp.bin
+        usr/lib/firmware/amdgpu/renoir_sdma.bin
+        usr/lib/firmware/amdgpu/renoir_vcn.bin
     )
 
     if [[ ! -f "$squashfs" || ! -s "$squashfs" ]]; then
@@ -371,11 +404,11 @@ validate_live_filesystem() {
 
     for path in "${required_paths[@]}"; do
         if ! squashfs_has_path "$squashfs" "$path"; then
-            die "Validacao da Live: executavel ausente no SquashFS: /$path"
+            die "Validacao da Live: arquivo critico ausente no SquashFS: /$path"
             return 1
         fi
     done
-    ui_ok "Todos os ${#required_paths[@]} executaveis criticos, incluindo Python 3, foram encontrados no SquashFS"
+    ui_ok "Todos os ${#required_paths[@]} arquivos criticos, incluindo aplicativos PMJS e firmware Renoir, foram encontrados no SquashFS"
 }
 
 publish_iso() {
