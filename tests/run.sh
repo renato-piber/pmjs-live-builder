@@ -77,7 +77,7 @@ test_config_parsing() {
     load_live_config "${PROJECT_ROOT}/config/live.conf"
     validate_config
     [[ "$LIVE_NAME" == pmjs-live ]]
-    [[ "$LIVE_VERSION" == 0.1.1 ]]
+    [[ "$LIVE_VERSION" == 0.1.2 ]]
     [[ "$DEBIAN_SUITE" == trixie ]]
     [[ "$CACHE_ENABLED" == true ]]
     [[ "$CACHE_DIR_ABS" == "${PROJECT_ROOT}/cache" ]]
@@ -86,7 +86,7 @@ test_config_parsing() {
 
 test_output_name() {
     load_live_config "${PROJECT_ROOT}/config/live.conf"
-    [[ "$(iso_filename)" == pmjs-live-0.1.1-amd64.iso ]]
+    [[ "$(iso_filename)" == pmjs-live-0.1.2-amd64.iso ]]
 }
 
 test_suite_validation() {
@@ -206,7 +206,7 @@ test_package_lists() {
         grub-common grub2-common efibootmgr live-config live-tools user-setup
         keyboard-configuration xserver-xorg lightdm libpam-systemd
         mate-desktop-environment-core mate-terminal caja network-manager
-        pluma filezilla gparted gnome-disk-utility nvme-cli testdisk gddrescue jq
+        pluma code filezilla gparted gnome-disk-utility nvme-cli testdisk gddrescue jq
         firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211
         firmware-mediatek firmware-intel-misc firmware-bnx2
         firmware-amd-graphics firmware-intel-graphics firmware-linux-free
@@ -230,6 +230,34 @@ test_package_lists() {
         return 1
     }
 }
+
+test_microsoft_vscode_repository() {
+    local archive_dir
+    archive_dir="${PROJECT_ROOT}/config-live/archives"
+
+    check_microsoft_vscode_repository_config
+    grep -Fxq \
+        'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/microsoft-vscode.key.asc] https://packages.microsoft.com/repos/code stable main' \
+        "${archive_dir}/microsoft-vscode.list"
+    [[ "$(sha256sum "${archive_dir}/microsoft-vscode.key" | awk '{print $1}')" == \
+        2fa9c05d591a1582a9aba276272478c262e95ad00acf60eaee1644d93941e3c6 ]]
+    grep -q 'usr/bin/code' "${PROJECT_ROOT}/lib/build.sh"
+}
+
+test_repository_access_includes_vscode() (
+    local checked_urls=''
+    DEBIAN_MIRROR='https://deb.example/debian'
+    DEBIAN_SECURITY_MIRROR='https://security.example/debian-security'
+    DEBIAN_SUITE='trixie'
+    repository_url_is_reachable() {
+        checked_urls+="$1"$'\n'
+    }
+
+    check_repository_access
+    grep -Fxq 'https://deb.example/debian/dists/trixie/Release' <<< "$checked_urls"
+    grep -Fxq 'https://security.example/debian-security/dists/trixie-security/Release' <<< "$checked_urls"
+    grep -Fxq 'https://packages.microsoft.com/repos/code/dists/stable/InRelease' <<< "$checked_urls"
+)
 
 test_project_structure() {
     check_project_structure
@@ -352,6 +380,8 @@ run_test 'migracao segura do cache legado' test_legacy_cache_migration
 run_test 'protecao contra symlinks' test_symlink_protection
 run_test 'parsing das novas opcoes CLI' test_argument_parsing
 run_test 'estrutura e conteudo das package lists' test_package_lists
+run_test 'repositorio oficial e pacote do Visual Studio Code' test_microsoft_vscode_repository
+run_test 'preflight verifica acesso ao repositorio do VS Code' test_repository_access_includes_vscode
 run_test 'estrutura de includes e hooks' test_project_structure
 run_test 'snapshots runtime controlados e sem artefatos' test_controlled_snapshots
 run_test 'wrappers e launchers graficos' test_wrappers_and_launchers

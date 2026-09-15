@@ -6,6 +6,9 @@ WORK_DIR_ABS=''
 LOG_DIR_ABS=''
 CACHE_DIR_ABS=''
 
+MICROSOFT_VSCODE_REPOSITORY='https://packages.microsoft.com/repos/code'
+MICROSOFT_VSCODE_KEY_SHA256='2fa9c05d591a1582a9aba276272478c262e95ad00acf60eaee1644d93941e3c6'
+
 die() {
     ui_error "$*"
     log_error "$*"
@@ -142,6 +145,46 @@ check_package_list_duplicates() {
     }
 }
 
+check_microsoft_vscode_repository_config() {
+    local archive_dir source_file preference_file key_file expected_source actual_key_sha
+    archive_dir="${PROJECT_ROOT}/config-live/archives"
+    source_file="${archive_dir}/microsoft-vscode.list"
+    preference_file="${archive_dir}/microsoft-vscode.pref"
+    key_file="${archive_dir}/microsoft-vscode.key"
+    expected_source="deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/microsoft-vscode.key.asc] ${MICROSOFT_VSCODE_REPOSITORY} stable main"
+
+    [[ -f "$source_file" && "$(<"$source_file")" == "$expected_source" ]] || {
+        die "Repositorio oficial do Visual Studio Code ausente ou alterado: $source_file"
+        return 1
+    }
+    [[ -f "$preference_file" ]] &&
+        grep -Fxq 'Package: code' "$preference_file" &&
+        grep -Fxq 'Pin: origin "packages.microsoft.com"' "$preference_file" &&
+        grep -Fxq 'Pin-Priority: 9999' "$preference_file" || {
+            die "Pinning do pacote code ausente ou invalido: $preference_file"
+            return 1
+        }
+    [[ -f "$key_file" ]] || {
+        die "Chave do repositorio do Visual Studio Code ausente: $key_file"
+        return 1
+    }
+    actual_key_sha=$(sha256sum -- "$key_file" | awk '{print $1}')
+    [[ "$actual_key_sha" == "$MICROSOFT_VSCODE_KEY_SHA256" ]] || {
+        die "Chave do repositorio do Visual Studio Code nao corresponde ao arquivo auditado."
+        return 1
+    }
+    grep -Ehq '^[[:space:]]*code[[:space:]]*$' \
+        "${PROJECT_ROOT}"/config-live/package-lists/*.list.chroot || {
+            die "Pacote code ausente das package lists."
+            return 1
+        }
+    ! grep -Ehq '^[[:space:]]*vscode[[:space:]]*$' \
+        "${PROJECT_ROOT}"/config-live/package-lists/*.list.chroot || {
+            die "Nome de pacote invalido vscode ainda presente nas package lists."
+            return 1
+        }
+}
+
 check_embedded_pmjs_runtime() {
     local include_root="${PROJECT_ROOT}/config-live/includes.chroot"
     local path forbidden
@@ -248,12 +291,14 @@ repository_url_is_reachable() {
 }
 
 check_repository_access() {
-    local main_release security_release
+    local main_release security_release vscode_release
     main_release="${DEBIAN_MIRROR%/}/dists/${DEBIAN_SUITE}/Release"
     security_release="${DEBIAN_SECURITY_MIRROR%/}/dists/${DEBIAN_SUITE}-security/Release"
+    vscode_release="${MICROSOFT_VSCODE_REPOSITORY}/dists/stable/InRelease"
 
     repository_url_is_reachable "$main_release" || die "Repositorio Debian inacessivel: $main_release. Verifique Internet, DNS, proxy e a suite."
     repository_url_is_reachable "$security_release" || die "Repositorio de seguranca inacessivel: $security_release. Verifique Internet, DNS, proxy e a suite."
+    repository_url_is_reachable "$vscode_release" || die "Repositorio oficial do Visual Studio Code inacessivel: $vscode_release. Verifique Internet, DNS e proxy."
 }
 
 check_project_structure() {
@@ -261,6 +306,7 @@ check_project_structure() {
     [[ -d "${PROJECT_ROOT}/config-live/includes.chroot" ]] || die "Diretorio de includes ausente."
     [[ -d "${PROJECT_ROOT}/config-live/hooks" ]] || die "Diretorio de hooks ausente."
     find "${PROJECT_ROOT}/config-live/package-lists" -maxdepth 1 -type f -name '*.list.chroot' | grep -q . || die "Nenhuma package list .list.chroot encontrada."
+    check_microsoft_vscode_repository_config
     check_package_list_duplicates
     check_embedded_pmjs_runtime
 }

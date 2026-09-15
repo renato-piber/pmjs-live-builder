@@ -51,7 +51,8 @@ acesso HTTPS aos repositorios Debian. O preflight verifica as ferramentas antes
 de alterar o estado de build.
 
 Internet e necessaria no computador que **constroi** a imagem para baixar os
-pacotes. Depois de pronta, a ISO contem o sistema e as ferramentas listadas e
+pacotes dos repositorios Debian e o Visual Studio Code do repositorio oficial da
+Microsoft. Depois de pronta, a ISO contem o sistema e as ferramentas listadas e
 pode iniciar e operar localmente sem Internet. Naturalmente, funcoes que acessam
 servicos remotos continuam dependendo de rede.
 
@@ -175,6 +176,32 @@ explicitamente os blobs AMD Renoir que faltavam no boot real. Nenhuma credencial
 senha real ou chave SSH e incorporada; as configuracoes operacionais dos
 aplicativos fazem parte de seus snapshots runtime.
 
+### Visual Studio Code
+
+O pacote instalado e `code`, fornecido pelo feed oficial
+`https://packages.microsoft.com/repos/code`; `vscode` nao e um nome de pacote
+valido nesse repositorio. A integracao usa os mecanismos nativos do
+`live-build` em `config-live/archives/`:
+
+- `microsoft-vscode.list` habilita o feed HTTPS para `amd64` nas fases chroot e
+  binary, sem editar ou substituir os repositorios Debian;
+- `microsoft-vscode.key` contem a chave publica auditada da Microsoft, com
+  fingerprint `BC52 8686 B50D 79E3 39D3 721C EB3E 94AD BE12 29CF`; o feed
+  referencia explicitamente essa chave pela opcao `signed-by`;
+- `microsoft-vscode.pref` da preferencia ao pacote `code` cuja origem seja
+  `packages.microsoft.com`.
+
+Como os arquivos nao possuem sufixo exclusivo de fase, o `live-build` usa o
+feed para resolver `code` durante a construcao e o conserva configurado na Live.
+Nao ha `curl | bash`, `apt-key`, instalacao manual no primeiro boot ou download
+de chave durante o build. A receita e versionada e verificavel; a versao do
+editor acompanha o canal `stable` oficial disponivel no momento de cada build,
+assim como os pacotes Debian acompanham os mirrors configurados.
+
+Referencias oficiais: [instalacao do VS Code no Linux](https://code.visualstudio.com/docs/setup/linux),
+[repositorios Microsoft para Linux](https://learn.microsoft.com/linux/packages)
+e [repositorios adicionais no Debian Live](https://live-team.pages.debian.net/live-manual/html/live-manual/customizing-package-installation.en.html#390).
+
 ## Dependencias de runtime PMJS
 
 As listas declaram explicitamente os pacotes que fornecem as ferramentas
@@ -206,6 +233,7 @@ esperadas pelo PMJS Deploy e PMJS Image Builder:
 | `ddrescue` | `gddrescue` |
 | `jq` | `jq` |
 | `pluma`, `filezilla`, `gparted`, `gnome-disks` | `pluma`, `filezilla`, `gparted`, `gnome-disk-utility` |
+| Visual Studio Code (`code`) | `code` (repositorio oficial Microsoft) |
 
 No Sprint 1.1 foram acrescentados diretamente `python3`, `mount`,
 `grub2-common` e `openssh-client`; os demais ja estavam declarados. Isso evita

@@ -41,6 +41,7 @@ on_error() {
 
     timer_live_stop "cleanup do tratador de erro" || true
     storage_preserve_home_preflight_cleanup || true
+    images_cleanup_offline_mount || true
     ui_error "Falha inesperada na linha $line_number."
     log_error "Falha inesperada na linha $line_number. Código: $exit_code"
 
@@ -54,6 +55,7 @@ on_signal() {
     [ "$signal" = "INT" ] && exit_code=130
     timer_live_stop "cleanup por sinal $signal" || true
     storage_preserve_home_preflight_cleanup || true
+    images_cleanup_offline_mount || true
     log_warning "PMJS Deploy interrompido por $signal."
     trap - ERR INT TERM
     exit "$exit_code"
@@ -122,6 +124,9 @@ main_menu() {
                 log_info "main_menu: iniciando fluxo de instalação."
                 install_start
                 timer_live_stop "cleanup defensivo ao retornar ao menu" || true
+                if ! images_cleanup_offline_mount; then
+                    ui_warning "A mídia offline não pôde ser desmontada; consulte o log."
+                fi
                 log_info "main_menu: fluxo de instalação retornou; retomando menu principal."
                 ;;
             2)
@@ -165,6 +170,9 @@ main_menu() {
                 ;;
 
             0)
+                if ! images_cleanup_offline_mount; then
+                    ui_warning "A mídia offline não pôde ser desmontada; consulte o log."
+                fi
                 exit 0
                 ;;
             *)

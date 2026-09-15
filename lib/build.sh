@@ -363,6 +363,7 @@ validate_live_filesystem() {
         usr/bin/ddrescue
         usr/bin/jq
         usr/bin/pluma
+        usr/bin/code
         usr/bin/filezilla
         usr/sbin/gparted
         usr/bin/gnome-disks

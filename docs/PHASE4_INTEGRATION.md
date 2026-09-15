@@ -120,6 +120,13 @@ testdisk, gddrescue, rsync, curl, wget e jq. As dependencias observadas nos dois
 aplicativos tambem incluem ferramentas GNU basicas, tar/gzip, util-linux,
 particionamento, filesystems, GRUB BIOS/UEFI, OpenSSH, rede e udev.
 
+O Visual Studio Code e instalado como pacote `code` pelo repositorio oficial da
+Microsoft. O feed, a chave publica auditada e o pinning de origem ficam
+versionados em `config-live/archives/` e sao aplicados nativamente pelo
+`live-build` nas fases chroot e binary. Isso torna o pacote resolvivel durante a
+build e deixa o mesmo repositorio configurado na Live, sem alterar as fontes
+Debian, executar scripts remotos ou exigir configuracao apos o boot.
+
 Nenhuma alteracao foi feita no kernel, Xorg, LightDM ou fluxo de boot para
 contornar firmware. LightDM e NetworkManager continuam apenas habilitados pelo
 hook baseline existente.
@@ -134,7 +141,8 @@ git diff --check
 
 Os testes verificam a lista exata dos snapshots, exclusoes, limites de tamanho,
 permissoes, wrappers, launchers, links do Desktop, MIME dos assets, override do
-wallpaper, pacotes sem duplicidade e receita/validacao Renoir. O build completo
+wallpaper, repositorio/chave do Visual Studio Code, pacotes sem duplicidade e
+receita/validacao Renoir. O build completo
 continua sendo necessario antes de uma release para comprovar a resolucao APT,
 o conteudo final do SquashFS e o boot em hardware.
 
