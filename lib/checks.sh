@@ -193,7 +193,6 @@ check_embedded_pmjs_runtime() {
         opt/pmjs/deploy/SNAPSHOT
         opt/pmjs/deploy/deploy.sh
         opt/pmjs/deploy/config/deploy.conf
-        opt/pmjs/deploy/assets/auto-mirror-x11
         opt/pmjs/deploy/lib/image_contract.sh
         opt/pmjs/deploy/lib/install.sh
         opt/pmjs/image-builder/VERSION
@@ -229,7 +228,6 @@ check_embedded_pmjs_runtime() {
     done
     for path in \
         opt/pmjs/deploy/deploy.sh \
-        opt/pmjs/deploy/assets/auto-mirror-x11 \
         opt/pmjs/image-builder/build-image.sh \
         opt/pmjs/image-builder/publish-image.sh \
         opt/pmjs/image-builder/sync-image-to-ventoy.sh \

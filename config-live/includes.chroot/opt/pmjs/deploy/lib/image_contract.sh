@@ -216,10 +216,19 @@ image_contract_verify_sha256() {
         return 1
     }
     started=$(date +%s)
-    checksum_output=$(sha256sum -- "$archive" 2>/dev/null) || {
-        image_contract_fail "Falha ao calcular SHA256 de $role."
-        return 1
-    }
+    # sha256sum le o mesmo archive uma unica vez. O supervisor somente consulta
+    # o offset do stdin compartilhado; nao recalcula hash para medir progresso.
+    if [ "$IMAGE_CONTRACT_QUIET" -ne 1 ] && declare -F timer_archive_run >/dev/null; then
+        checksum_output=$(timer_archive_run "$archive" "Validando SHA256 $role" A sha256sum 2>/dev/null) || {
+            image_contract_fail "Falha ao calcular SHA256 de $role."
+            return 1
+        }
+    else
+        checksum_output=$(sha256sum -- "$archive" 2>/dev/null) || {
+            image_contract_fail "Falha ao calcular SHA256 de $role."
+            return 1
+        }
+    fi
     actual=${checksum_output%% *}
     finished=$(date +%s)
     printf -v "$duration_variable" '%s' "$((finished - started))"

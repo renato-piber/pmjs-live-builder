@@ -158,17 +158,6 @@ main_menu() {
                 ui_pause
                 ;;
 
-            6)
-                ui_clear
-                ui_title "$VERSION"
-
-                if disks_select; then
-                    disks_show_details "$SELECTED_DISK"
-                fi
-
-                ui_pause
-                ;;
-
             0)
                 if ! images_cleanup_offline_mount; then
                     ui_warning "A mídia offline não pôde ser desmontada; consulte o log."

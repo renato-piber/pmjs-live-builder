@@ -36,8 +36,11 @@ resultado e troca cada snapshot por rename. Se a troca falhar, restaura a versao
 anterior; um staging que nao puder ser restaurado com seguranca e preservado para
 diagnostico. A ferramenta nunca usa `rm -rf`.
 
-Entram no snapshot do Deploy: `VERSION`, `deploy.sh`, `config/deploy.conf`, o
-helper `assets/auto-mirror-x11` e as bibliotecas efetivamente carregadas. Entram
+Entram no snapshot do Deploy: `VERSION`, `deploy.sh`, `config/deploy.conf` e as
+bibliotecas efetivamente carregadas. O antigo helper `assets/auto-mirror-x11`,
+removido do Deploy operacional, nao e mais incorporado nem exigido pelo preflight
+ou pelo hook da Live. Arquivos runtime novos ainda precisam ser incluidos
+explicitamente na lista fechada do atualizador. Entram
 no snapshot do Image Builder: `VERSION`, os tres entrypoints, `config/image.conf`
 e suas bibliotecas runtime. Cada snapshot ganha um arquivo `SNAPSHOT` com nome,
 versao, commit e estado dos arquivos copiados.

@@ -447,6 +447,7 @@ chroot_boot_run() {
 
 chroot_boot_update_initramfs() {
     local status=0
+    if declare -F timer_progress_indeterminate >/dev/null; then timer_progress_indeterminate "Gerando initramfs"; fi
 
     log_info "Boot: antes de executar update-initramfs -u -k all."
     chroot_boot_run update-initramfs -u -k all || status=$?
@@ -456,6 +457,7 @@ chroot_boot_update_initramfs() {
 }
 
 chroot_boot_install_grub_uefi() {
+    if declare -F timer_progress_indeterminate >/dev/null; then timer_progress_indeterminate "Instalando GRUB UEFI"; fi
     chroot_boot_run grub-install --target=x86_64-efi --efi-directory=/boot/efi \
         --bootloader-id=debian --no-nvram --recheck || return 1
     chroot_boot_run grub-install --target=x86_64-efi --efi-directory=/boot/efi \
@@ -465,6 +467,7 @@ chroot_boot_install_grub_uefi() {
 
 chroot_boot_install_grub_legacy() {
     local disk_type=""
+    if declare -F timer_progress_indeterminate >/dev/null; then timer_progress_indeterminate "Instalando GRUB Legacy"; fi
 
     disk_type=$(lsblk -dn -o TYPE -- "$INSTALL_DISK" 2>/dev/null | head -n1 || true)
     [ "$disk_type" = "disk" ] || return 1
@@ -473,6 +476,7 @@ chroot_boot_install_grub_legacy() {
 }
 
 chroot_boot_generate_config() {
+    if declare -F timer_progress_indeterminate >/dev/null; then timer_progress_indeterminate "Configurando GRUB"; fi
     if [ -x "$INSTALL_TARGET_ROOT/usr/sbin/update-grub" ] || [ -x "$INSTALL_TARGET_ROOT/sbin/update-grub" ]; then
         chroot_boot_run update-grub
     else

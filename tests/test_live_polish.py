@@ -216,5 +216,70 @@ class LiveIntegrationTests(unittest.TestCase):
             self.assertNotEqual(subprocess.run(["bash", "-c", base], capture_output=True).returncode, 0)
 
 
+class DeploySnapshotUpdateTests(unittest.TestCase):
+    """Checkout simulado: sem rede, ISO build ou execucao do Deploy."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="pmjs-deploy-snapshot-")
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.source = self.directory / "source"
+        self.staging = self.directory / "staging"
+        self.updater = ROOT / "tools/update-pmjs-snapshots.sh"
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; printf "%s\\n" "${DEPLOY_RUNTIME_FILES[@]}"',
+             "snapshot-test", str(self.updater)],
+            check=True, capture_output=True, text=True,
+        )
+        self.runtime_files = result.stdout.splitlines()
+        for name in self.runtime_files:
+            path = self.source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("1.0.0\n" if name == "VERSION" else "#!/bin/sh\nexit 0\n")
+        (self.source / "deploy.sh").chmod(0o755)
+
+    def copy_snapshot(self):
+        return subprocess.run(
+            ["bash", "-c", '''source "$1"
+STAGING_ROOT=$3
+copy_runtime_snapshot "$2" deploy DEPLOY_RUNTIME_FILES
+validate_runtime_snapshot "$3/deploy" deploy.sh "${#DEPLOY_RUNTIME_FILES[@]}"
+''', "snapshot-test", str(self.updater), str(self.source), str(self.staging)],
+            capture_output=True, text=True,
+        )
+
+    def test_current_deploy_without_retired_projection_helper(self):
+        self.assertNotIn("assets/auto-mirror-x11", self.runtime_files)
+        self.assertIn("lib/timer.sh", self.runtime_files)
+        self.assertIn("lib/image_contract.sh", self.runtime_files)
+        result = self.copy_snapshot()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        snapshot = self.staging / "deploy"
+        actual = {str(path.relative_to(snapshot)) for path in snapshot.rglob("*") if path.is_file()}
+        self.assertEqual(actual, set(self.runtime_files) | {"SNAPSHOT"})
+        self.assertFalse((snapshot / "assets/auto-mirror-x11").exists())
+
+    def test_missing_required_runtime_file_still_rejected(self):
+        (self.source / "lib/image_contract.sh").unlink()
+        result = self.copy_snapshot()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lib/image_contract.sh", result.stderr)
+        self.assertFalse((self.staging / "deploy").exists())
+
+    def test_symlink_runtime_file_still_rejected(self):
+        path = self.source / "lib/timer.sh"
+        path.unlink()
+        path.symlink_to(self.source / "deploy.sh")
+        result = self.copy_snapshot()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lib/timer.sh", result.stderr)
+        self.assertFalse((self.staging / "deploy").exists())
+
+    def test_preflight_and_chroot_hook_do_not_require_retired_helper(self):
+        for path in (ROOT / "lib/checks.sh",
+                     ROOT / "config-live/hooks/live/010-pmjs-baseline.hook.chroot"):
+            self.assertNotIn("assets/auto-mirror-x11", path.read_text())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

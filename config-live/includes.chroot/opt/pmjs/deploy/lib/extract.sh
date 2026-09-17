@@ -51,6 +51,20 @@ extract_tar_read_options() {
     esac
 }
 
+extract_run_archive() {
+    local archive=$1 label=$2 i=0
+    shift 2
+    local -a command=("$@")
+    for ((i=0; i < ${#command[@]}; i++)); do
+        if [ "${command[$i]}" = --file ]; then command[$((i + 1))]=-; break; fi
+    done
+    if declare -F timer_archive_run >/dev/null; then
+        timer_archive_run "$archive" "$label" B "${command[@]}"
+    else
+        "${command[@]}" < "$archive"
+    fi
+}
+
 extract_build_tar_command() {
     local archive="$1"
     local destination="$2"
@@ -145,6 +159,7 @@ extract_archive_has_safe_paths() {
     local error_file=""
     local unsafe_entry=""
     local -a compression_options=()
+    local entries_total=0 entries_done=0 started_tick=0 last_tick=-1 token="" started_wall=0
 
     listing_file=$(mktemp /tmp/pmjs-tar-list.XXXXXX) || return 2
     error_file=$(mktemp /tmp/pmjs-tar-list-error.XXXXXX) || {
@@ -156,7 +171,8 @@ extract_archive_has_safe_paths() {
         rm -f "$listing_file" "$error_file"
         return 2
     }
-    if ! LC_ALL=C tar --list "${compression_options[@]}" --file "$archive" \
+    if ! LC_ALL=C extract_run_archive "$archive" "Lendo estrutura $archive_label (safe-path)" \
+        tar --list "${compression_options[@]}" --file "$archive" \
         > "$listing_file" 2> "$error_file"; then
         log_error "Falha ao ler a estrutura tar/$compression de $archive_label: $archive"
         extract_append_stderr_to_log "Inspeção de $archive_label" "$error_file"
@@ -165,7 +181,19 @@ extract_archive_has_safe_paths() {
     fi
     rm -f "$error_file"
 
+    # Segunda leitura apenas do listing local gerado, nunca do archive.
+    entries_total=$(wc -l < "$listing_file")
+    started_tick=$SECONDS; started_wall=$(date +%s); token="${BASHPID}-${RANDOM}"
+    if declare -F timer_progress_publish >/dev/null; then
+        timer_progress_publish "$token" "Verificando nomes $archive_label" A 0 "$entries_total" 0 running "$started_wall"
+    fi
+
     while IFS= read -r entry || [ -n "$entry" ]; do
+        entries_done=$((entries_done + 1))
+        if (( SECONDS != last_tick )) && declare -F timer_progress_publish >/dev/null; then
+            timer_progress_publish "$token" "Verificando nomes $archive_label" A "$entries_done" "$entries_total" "$(((SECONDS - started_tick) * 1000))" running "$started_wall"
+            last_tick=$SECONDS
+        fi
         [ -n "$entry" ] || continue
 
         case "$entry" in
@@ -193,8 +221,14 @@ extract_archive_has_safe_paths() {
     rm -f "$listing_file"
 
     if [ -n "$unsafe_entry" ]; then
+        if declare -F timer_progress_publish >/dev/null; then
+            timer_progress_publish "$token" "Verificando nomes $archive_label" A "$entries_done" "$entries_total" "$(((SECONDS - started_tick) * 1000))" failed "$started_wall"
+        fi
         log_error "Caminho inseguro encontrado em $archive_label: $unsafe_entry"
         return 1
+    fi
+    if declare -F timer_progress_publish >/dev/null; then
+        timer_progress_publish "$token" "Verificando nomes $archive_label" A "$entries_total" "$entries_total" "$(((SECONDS - started_tick) * 1000))" success "$started_wall"
     fi
     return 0
 }
@@ -288,6 +322,16 @@ extract_check_archive() {
 
     log_info "Archive validado com sucesso: $archive"
     return 0
+}
+
+extract_preflight_archives() {
+    extract_resolve_archives || return 1
+    extract_check_archive "$EXTRACT_ROOTFS_ARCHIVE" rootfs || return 1
+    case "${INSTALL_STORAGE_MODE:-}" in
+        clean) extract_check_archive "$EXTRACT_HOMEFS_ARCHIVE" homefs || return 1 ;;
+        preserve_home) log_info "Preserve_home: homefs nao sera extraido." ;;
+        *) return 1 ;;
+    esac
 }
 
 extract_validate() {
@@ -449,7 +493,7 @@ extract_rootfs() {
     error_file=$(mktemp /tmp/pmjs-rootfs-extract-error.XXXXXX) || return 1
     extraction_start=$(date +%s)
     log_info "Iniciando extração do rootfs."
-    if "${tar_command[@]}" >/dev/null 2>"$error_file"; then
+    if extract_run_archive "$EXTRACT_ROOTFS_ARCHIVE" "Extraindo sistema (rootfs)" "${tar_command[@]}" >/dev/null 2>"$error_file"; then
         extraction_status=0
     else
         extraction_status=$?
@@ -488,7 +532,7 @@ extract_homefs() {
     error_file=$(mktemp /tmp/pmjs-homefs-extract-error.XXXXXX) || return 1
     extraction_start=$(date +%s)
     log_info "Iniciando extração do homefs."
-    if "${tar_command[@]}" >/dev/null 2>"$error_file"; then
+    if extract_run_archive "$EXTRACT_HOMEFS_ARCHIVE" "Extraindo home (homefs)" "${tar_command[@]}" >/dev/null 2>"$error_file"; then
         extraction_status=0
     else
         extraction_status=$?
@@ -514,6 +558,7 @@ extract_sync_final() {
     local sync_status=0
 
     sync_start=$(date +%s)
+    if declare -F timer_progress_indeterminate >/dev/null; then timer_progress_indeterminate "Sincronizando dados no disco"; fi
     log_info "Iniciando sync final após a extração."
     if log_run_external sync; then
         sync_status=0

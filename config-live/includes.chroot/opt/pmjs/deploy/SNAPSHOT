@@ -1,4 +1,4 @@
 project=deploy
-version=2.0.0-dev
-source_commit=f6cb9bf113d74faf616cf957302d5774717ea321
-source_state=clean
+version=3.0.0-dev
+source_commit=49c6f5d5ef9568e1183886d1123733c12c477099
+source_state=dirty

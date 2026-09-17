@@ -18,7 +18,6 @@ test -f /usr/share/applications/gparted.desktop
 test -x /usr/bin/flameshot
 
 chmod 0755 /opt/pmjs/deploy/deploy.sh \
-    /opt/pmjs/deploy/assets/auto-mirror-x11 \
     /opt/pmjs/image-builder/build-image.sh \
     /opt/pmjs/image-builder/publish-image.sh \
     /opt/pmjs/image-builder/sync-image-to-ventoy.sh \

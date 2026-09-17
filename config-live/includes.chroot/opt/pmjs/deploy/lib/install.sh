@@ -8,7 +8,6 @@ INSTALL_IMAGE_DIR=""
 INSTALL_DISK=""
 INSTALL_HOSTNAME=""
 INSTALL_OCS_TAG=""
-INSTALL_CLASSROOM=0
 INSTALL_MODE=""
 INSTALL_BOOT_MODE=""
 INSTALL_BOOT_DETECTED=""
@@ -25,29 +24,27 @@ INSTALL_HOME_PARTITION=""
 EDUINSTALL_LAYOUT_DETECTED=0
 INSTALL_DESTRUCTIVE_STARTED=0
 
-install_collect_environment() {
-    echo
-    echo "Etapa 1 de 7 - Ambiente"
-    echo
-
-    read -rp "Selecione o ambiente [dev/prod] [prod]: " INSTALL_MODE
-    INSTALL_MODE=${INSTALL_MODE:-prod}
-
-    case "$INSTALL_MODE" in
-        dev)
-            PMJS_ENVIRONMENT="development"
+install_prepare_operational_mode() {
+    INSTALL_MODE="$PMJS_ENVIRONMENT"
+    case "${PMJS_DEPLOY_EXECUTION_MODE:-real}" in
+        real)
+            INSTALL_EXECUTION_MODE=real
+            PARTITIONS_DRY_RUN=0
+            FILESYSTEMS_DRY_RUN=0
+            MOUNTS_DRY_RUN=0
             ;;
-        prod)
-            PMJS_ENVIRONMENT="production"
+        dry-run)
+            INSTALL_EXECUTION_MODE=dry-run
+            PARTITIONS_DRY_RUN=1
+            FILESYSTEMS_DRY_RUN=1
+            MOUNTS_DRY_RUN=1
             ;;
         *)
-            ui_error "Ambiente inválido: $INSTALL_MODE"
+            ui_error "Modo interno de execucao invalido: $PMJS_DEPLOY_EXECUTION_MODE"
             return 1
             ;;
     esac
-
-    ui_success "Ambiente selecionado: $INSTALL_MODE"
-    log_info "Ambiente de instalação selecionado: $INSTALL_MODE"
+    log_info "Fluxo operacional: ambiente=$PMJS_ENVIRONMENT; execucao=$INSTALL_EXECUTION_MODE."
 }
 
 install_collect_boot_mode() {
@@ -60,7 +57,7 @@ install_collect_boot_mode() {
     INSTALL_BOOT_DETECTED="$detected_mode"
 
     echo
-    echo "Etapa 5 de 7 - Modo de instalação"
+    echo "Etapa 3 de 5 - Modo de instalação"
     echo
 
     read -rp "Escolha o modo de instalação [uefi/legacy] [$detected_mode]: " INSTALL_BOOT_MODE
@@ -81,7 +78,7 @@ install_collect_boot_mode() {
 
 install_collect_identity() {
     echo
-    echo "Etapa 6 de 7 - Identificação da máquina"
+    echo "Etapa 5 de 5 - Identificação da máquina"
     echo
 
     read -rp "Digite o hostname da nova instalação: " INSTALL_HOSTNAME
@@ -96,37 +93,10 @@ install_collect_identity() {
     return 0
 }
 
-install_collect_classroom() {
-    local answer
-
-    echo
-    echo "Etapa 7 de 7 - Configuração de sala"
-    echo
-
-    read -rp "Este computador será utilizado em Sala de Aula? [s/N]: " answer
-
-    case "$answer" in
-        s|S|sim|SIM)
-        INSTALL_CLASSROOM=1
-        log_info "Configuração automática de Sala de Aula habilitada."
-        ;;
-        *)
-        INSTALL_CLASSROOM=0
-        log_info "Configuração de Sala de Aula desabilitada."
-        ;;
-    esac
-}
 
 install_summary() {
-    local classroom_text
     local install_boot_text
     local box_width=50
-
-    if [ "$INSTALL_CLASSROOM" -eq 1 ]; then
-        classroom_text="Sim — espelhamento automático"
-    else
-        classroom_text="Não"
-    fi
 
     install_boot_text="${INSTALL_BOOT_MODE:-não definido}"
 
@@ -150,49 +120,18 @@ install_summary() {
     printf "%-20s : %s\n" "Instalação" "${INSTALL_BOOT_MODE:-não definido}"
     printf "%-20s : %s\n" "Hostname" "${INSTALL_HOSTNAME:-não definido}"
     printf "%-20s : %s\n" "Tag OCS" "${INSTALL_OCS_TAG:-não definida}"
-    printf "%-20s : %s\n" "Sala" "$classroom_text"
 
     echo
     printf '%s\n' '--------------------------------------------------'
-    echo ' MODO SIMULAÇÃO: nenhuma alteração será executada.'
+    if [ "${INSTALL_EXECUTION_MODE:-dry-run}" = real ]; then
+        echo ' INSTALAÇÃO REAL: requer confirmação destrutiva.'
+    else
+        echo ' DRY-RUN INTERNO: nenhuma alteração será executada.'
+    fi
     printf '=%.0s' {1..50}
     echo
 }
 
-install_collect_execution_mode() {
-    local option
-
-    echo
-    echo "Modo de execução"
-    echo
-    echo "1) Simulação"
-    echo "2) Instalação real"
-    echo
-
-    read -rp "Escolha [1]: " option
-    option=${option:-1}
-
-    case "$option" in
-        1)
-            INSTALL_EXECUTION_MODE="dry-run"
-            PARTITIONS_DRY_RUN=1
-            FILESYSTEMS_DRY_RUN=1
-            MOUNTS_DRY_RUN=1
-            ;;
-        2)
-            INSTALL_EXECUTION_MODE="real"
-            PARTITIONS_DRY_RUN=0
-            FILESYSTEMS_DRY_RUN=0
-            MOUNTS_DRY_RUN=0
-            ;;
-        *)
-            ui_error "Opção inválida."
-            return 1
-            ;;
-    esac
-
-    return 0
-}
 
 install_confirm_destructive() {
     local answer=""
@@ -291,18 +230,13 @@ install_start() {
     ui_clear
     ui_title "$VERSION"
 
-    if ! install_collect_environment; then
+    if ! install_prepare_operational_mode; then
         ui_pause
         return
     fi
 
-    if ! install_collect_execution_mode; then
-    ui_pause
-    return
-    fi
-
     echo
-    echo "Etapa 2 de 7 - Origem das imagens"
+    echo "Etapa 1 de 5 - Origem das imagens"
     echo
 
     if ! images_select_source; then
@@ -311,7 +245,7 @@ install_start() {
     fi
 
     echo
-    echo "Etapa 3 de 7 - Seleção da imagem"
+    echo "Etapa 2 de 5 - Seleção da imagem"
 
     if ! images_choose; then
         ui_pause
@@ -327,7 +261,7 @@ install_start() {
     fi
 
     echo
-    echo "Etapa 4 de 7 - Seleção do disco"
+    echo "Etapa 4 de 5 - Seleção do disco e plano"
 
     if ! disks_select; then
         ui_pause
@@ -360,17 +294,11 @@ install_start() {
         return
     fi
 
-    echo
-    echo "Etapa 6 de 6 - Configuração de sala"
-
-    if ! install_collect_classroom; then
-        ui_pause
-        return
-    fi
     timer_step_stop "preparation"
 
     install_summary
 
+    timer_live_start || true
     if ! timer_run_step "validation" "Validação do plano" install_validate; then
         ui_pause
         return
@@ -388,6 +316,13 @@ install_start() {
         return
     fi
 
+    # Inspecao pre-destrutiva nova; manter tambem a guarda antes da extracao.
+    if ! timer_run_step "archive_preflight" "Inspeção segura dos archives" extract_preflight_archives; then
+        ui_pause
+        return
+    fi
+
+    timer_live_stop "confirmacao destrutiva exige terminal livre" || true
     if ! install_confirm_destructive; then
         ui_pause
         return

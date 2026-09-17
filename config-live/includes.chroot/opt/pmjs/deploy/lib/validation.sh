@@ -29,29 +29,15 @@ validation_record_error() {
 }
 
 validate_environment() {
-    local mode="${INSTALL_MODE:-}"
-
-    if [ -z "$mode" ]; then
-        validation_record_error "O modo de execução não foi informado."
+    case "${PMJS_ENVIRONMENT:-}" in
+        production|development) ;;
+        *) validation_record_error "Ambiente invalido: ${PMJS_ENVIRONMENT:-vazio}"; return 1 ;;
+    esac
+    if [ "${INSTALL_MODE:-}" != "$PMJS_ENVIRONMENT" ]; then
+        validation_record_error "O resumo nao corresponde ao ambiente ativo."
         return 1
     fi
-
-    case "$mode" in
-        dev)
-            validation_record_ok "Modo dev reconhecido; não é exigido acesso ao NFS."
-            ;;
-        prod)
-            if [ -z "${IMAGES_SOURCE:-}" ]; then
-                validation_record_error "O modo prod exige que uma origem de imagens tenha sido selecionada."
-                return 1
-            fi
-            validation_record_ok "Modo prod reconhecido; origem efetivamente escolhida: $IMAGES_SOURCE."
-            ;;
-        *)
-            validation_record_error "Modo de execução inválido: $mode"
-            return 1
-            ;;
-    esac
+    validation_record_ok "Ambiente ativo: $PMJS_ENVIRONMENT."
 }
 
 validate_source() {
@@ -267,22 +253,6 @@ validate_boot() {
     fi
 }
 
-validate_classroom_state() {
-    case "$INSTALL_CLASSROOM" in
-        0|1)
-            ;;
-        *)
-            validation_record_error "A configuração de sala está inválida: $INSTALL_CLASSROOM"
-            return 1
-            ;;
-    esac
-
-    if [ "$INSTALL_CLASSROOM" -eq 1 ]; then
-        validation_record_ok "Configuração automática de Sala de Aula habilitada."
-    else
-        validation_record_ok "Configuração de sala não aplicada."
-    fi
-}
 
 validate_storage_plan() {
     case "$INSTALL_STORAGE_MODE" in
@@ -362,7 +332,6 @@ install_validate() {
     validate_disk || validation_status=1
     validate_identity || validation_status=1
     validate_boot || validation_status=1
-    validate_classroom_state || validation_status=1
     validate_storage_plan || validation_status=1
 
     echo

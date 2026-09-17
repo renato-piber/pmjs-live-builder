@@ -6,10 +6,199 @@ TIMER_CURRENT_STEP=""
 TIMER_CURRENT_START=0
 TIMER_LIVE_PID=""
 TIMER_LIVE_STATE_FILE=""
+TIMER_LIVE_STATE_DIR=""
 TIMER_LIVE_ACTIVE=0
 declare -a TIMER_STEP_ORDER=()
 declare -A TIMER_STEP_LABELS=()
 declare -A TIMER_STEP_DURATIONS=()
+
+# Taxa EWMA em bytes/unidades por segundo; ETA somente apos aquecimento.
+timer_progress_reset() {
+    TIMER_PROGRESS_LAST_DONE=0
+    TIMER_PROGRESS_LAST_MS=0
+    TIMER_PROGRESS_RATE=0
+    TIMER_PROGRESS_SAMPLES=0
+    TIMER_PROGRESS_PERCENT=""
+    TIMER_PROGRESS_ETA=""
+}
+
+timer_progress_update() {
+    local done=$1 total=$2 milliseconds=$3 result=${4:-running} delta=0 rate=0 remaining=0
+    TIMER_PROGRESS_PERCENT=""
+    TIMER_PROGRESS_ETA=""
+    [[ "$done" =~ ^[0-9]+$ && "$total" =~ ^[0-9]+$ && "$milliseconds" =~ ^[0-9]+$ ]] || return 1
+    (( total > 0 )) || return 0
+    (( done <= total )) || done=$total
+    TIMER_PROGRESS_PERCENT=$((done * 100 / total))
+    if [ "$result" = success ]; then
+        TIMER_PROGRESS_PERCENT=100
+        TIMER_PROGRESS_ETA=0
+        return 0
+    fi
+    # EOF/read-ahead nao significa que o consumidor terminou/teve sucesso.
+    (( TIMER_PROGRESS_PERCENT < 100 )) || TIMER_PROGRESS_PERCENT=99
+    [ "$result" = running ] || return 0
+    if (( done < TIMER_PROGRESS_LAST_DONE || milliseconds < TIMER_PROGRESS_LAST_MS )); then
+        timer_progress_reset
+        return 0
+    fi
+    delta=$((milliseconds - TIMER_PROGRESS_LAST_MS))
+    if (( delta >= 1000 )); then
+        rate=$(((done - TIMER_PROGRESS_LAST_DONE) * 1000 / delta))
+        if (( TIMER_PROGRESS_SAMPLES == 0 )); then
+            TIMER_PROGRESS_RATE=$rate
+        else
+            TIMER_PROGRESS_RATE=$(((TIMER_PROGRESS_RATE * 3 + rate) / 4))
+        fi
+        TIMER_PROGRESS_SAMPLES=$((TIMER_PROGRESS_SAMPLES + 1))
+        TIMER_PROGRESS_LAST_DONE=$done
+        TIMER_PROGRESS_LAST_MS=$milliseconds
+    fi
+    if (( milliseconds >= 5000 && TIMER_PROGRESS_SAMPLES >= 3 &&
+          TIMER_PROGRESS_RATE > 0 && done > 0 && done < total )); then
+        remaining=$((total - done))
+        TIMER_PROGRESS_ETA=$(((remaining + TIMER_PROGRESS_RATE - 1) / TIMER_PROGRESS_RATE))
+    fi
+}
+
+timer_progress_publish() {
+    local token=$1 label=$2 kind=$3 done=$4 total=$5 milliseconds=$6 result=$7 started=$8
+    local temporary=""
+    [ "${TIMER_LIVE_ACTIVE:-0}" -eq 1 ] && [ -f "${TIMER_LIVE_STATE_FILE:-}" ] || return 0
+    label=${label//$'\n'/ }; label=${label//|/-}
+    temporary=$(mktemp "${TIMER_LIVE_STATE_FILE}.progress.tmp.XXXXXX") || return 0
+    if ! printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$token" "$label" "$kind" "$done" "$total" "$milliseconds" "$result" "$started" > "$temporary" ||
+       ! mv -f -- "$temporary" "${TIMER_LIVE_STATE_FILE}.progress"; then
+        rm -f -- "$temporary"
+        return 0 # Falha da telemetria nao muda o resultado da operacao.
+    fi
+}
+
+timer_progress_indeterminate() {
+    timer_progress_publish "${BASHPID}-${RANDOM}" "$1" C 0 0 0 running "$(timer_now)"
+}
+
+# Um unico leitor: o filho recebe o archive como stdin regular e compartilha
+# a open file description com o supervisor. lseek consulta offset, nao le dados.
+# Mantido neste modulo para nao exigir um novo arquivo no snapshot da Live.
+timer_archive_run() {
+    local archive=$1 label=$2 kind=$3 state="" status=0
+    shift 3
+    if [ "${TIMER_LIVE_ACTIVE:-0}" -eq 1 ]; then state=$TIMER_LIVE_STATE_FILE; fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        timer_progress_indeterminate "$label (sem medicao)"
+        "$@" < "$archive"
+        return $?
+    fi
+    python3 - "$archive" "$label" "$kind" "$state" "$@" <<'PY' || status=$?
+import os
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+archive, label, kind, state, *command = sys.argv[1:]
+token = uuid.uuid4().hex
+label = label.replace('|', '-').replace('\n', ' ')
+started_wall = int(time.time())
+started = time.monotonic()
+child = None
+pending_signal = 0
+metric_available = True
+
+def interrupted(signum, frame):
+    global pending_signal
+    pending_signal = signum
+    if child is not None:
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+
+for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(signum, interrupted)
+
+def publish(done, total, result):
+    if not state or not os.path.isfile(state):
+        return
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix='.progress-', dir=os.path.dirname(state))
+        with os.fdopen(fd, 'w', encoding='utf-8') as output:
+            measured_kind = kind if metric_available else 'C'
+            output.write(f'{token}|{label}|{measured_kind}|{done}|{total}|'
+                         f'{int((time.monotonic() - started) * 1000)}|{result}|{started_wall}\n')
+        os.replace(temporary, state + '.progress')
+    except OSError:
+        pass # Apenas feedback; nunca mascarar erro do archive/consumidor.
+    finally:
+        try:
+            if temporary is not None:
+                os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+def position(fd, total):
+    global metric_available
+    try:
+        return min(os.lseek(fd, 0, os.SEEK_CUR), total)
+    except OSError:
+        metric_available = False
+        return 0 # Falha de medicao: consumidor continua, UI indeterminada.
+
+try:
+    fd = os.open(archive, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb', buffering=0) as source:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+            raise ValueError('archive nao regular ou vazio')
+        total = info.st_size
+        publish(0, total, 'running')
+        child = subprocess.Popen(command, stdin=source, start_new_session=True)
+        if pending_signal:
+            interrupted(pending_signal, None)
+        while child.poll() is None:
+            publish(position(fd, total), total, 'running')
+            try:
+                child.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+            if pending_signal and child.poll() is None:
+                # Um consumidor que ignore TERM nao pode permanecer orfao.
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        status = 128 + pending_signal if pending_signal else child.returncode
+        if status < 0:
+            status = 128 - status
+        if pending_signal:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        publish(position(fd, total), total,
+                'success' if status == 0 else 'failed')
+        sys.exit(status)
+except (OSError, ValueError) as error:
+    if child is not None and child.poll() is None:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+    print(f'Falha no consumidor do archive: {error}', file=sys.stderr)
+    publish(0, 0, 'failed')
+    sys.exit(1)
+PY
+    return "$status"
+}
 
 timer_now() {
     date +%s
@@ -17,6 +206,7 @@ timer_now() {
 
 timer_reset() {
     timer_live_stop "cleanup antes de reiniciar o timer" || true
+    timer_progress_reset
     TIMER_TOTAL_START=0
     TIMER_TOTAL_DURATION=0
     TIMER_CURRENT_STEP=""
@@ -58,7 +248,7 @@ timer_live_publish_state() {
     fi
     label=${label//$'\n'/ }
     label=${label//|/-}
-    temporary="${TIMER_LIVE_STATE_FILE}.tmp.$$"
+    temporary=$(mktemp "${TIMER_LIVE_STATE_FILE}.tmp.XXXXXX") || return 1
     if ! printf '%s|%s|%s|%s\n' \
         "$TIMER_CURRENT_STEP" "$label" "$TIMER_CURRENT_START" "$TIMER_TOTAL_START" \
         > "$temporary" ||
@@ -73,7 +263,7 @@ timer_live_worker() {
     local state_file="$2"
     local rows="$3"
     local columns="$4"
-    local scroll_bottom=$((rows - 4))
+    local scroll_bottom=$((rows - 6))
     local step_id=""
     local label=""
     local step_start=0
@@ -82,13 +272,16 @@ timer_live_worker() {
     local step_elapsed=0
     local total_elapsed=0
     local cleanup_reason="encerramento normal"
+    local token="" previous_token="" progress_label="" kind="" done=0 total=0 milliseconds=0 result="" started=0
+    local progress_text="indeterminado" eta_text="não disponível" filled=0 empty=0 bar="" footer=""
+    timer_progress_reset
 
     timer_live_worker_cleanup() {
         local row=0
 
         if exec 9<>/dev/tty 2>/dev/null; then
             printf '\0337\033[r' >&9
-            for row in $((rows - 2)) $((rows - 1)) "$rows"; do
+            for row in $((rows - 4)) $((rows - 3)) $((rows - 2)) $((rows - 1)) "$rows"; do
                 printf '\033[%s;1H\033[2K' "$row" >&9
             done
             printf '\0338\033[?25h' >&9
@@ -112,14 +305,37 @@ timer_live_worker() {
             now=$(timer_now)
             [[ "$step_start" =~ ^[0-9]+$ ]] || step_start=$now
             [[ "$total_start" =~ ^[0-9]+$ ]] || total_start=$now
+            (( step_start > 0 && step_start <= now )) || step_start=$now
+            (( total_start > 0 && total_start <= now )) || total_start=$now
             step_elapsed=$((now - step_start))
             total_elapsed=$((now - total_start))
-            label=${label:0:$((columns > 24 ? columns - 14 : 10))}
-
-            printf '\0337\033[%s;1H\033[2KEtapa atual: %s\033[%s;1H\033[2KTempo da etapa: %s\033[%s;1H\033[2KTempo total: %s\0338' \
-                "$((rows - 2))" "$label" \
-                "$((rows - 1))" "$(timer_format_duration "$step_elapsed")" \
-                "$rows" "$(timer_format_duration "$total_elapsed")" >&9
+            progress_text="indeterminado"; eta_text="não disponível"
+            if [ -f "${state_file}.progress" ] && IFS='|' read -r token progress_label kind done total milliseconds result started < "${state_file}.progress"; then
+                if [ "$token" != "$previous_token" ]; then timer_progress_reset; previous_token=$token; fi
+                label=$progress_label
+                if [[ "$started" =~ ^[0-9]+$ ]]; then
+                    step_elapsed=$((now - started))
+                    (( step_elapsed >= 0 )) || step_elapsed=0
+                fi
+                if [ "$kind" != C ] && timer_progress_update "$done" "$total" "$milliseconds" "$result" && [ -n "$TIMER_PROGRESS_PERCENT" ]; then
+                    filled=$((TIMER_PROGRESS_PERCENT / 5)); empty=$((20 - filled))
+                    printf -v bar '%*s' "$filled" ''; bar=${bar// /#}
+                    printf -v footer '%*s' "$empty" ''; footer=${footer// /-}
+                    progress_text="[$bar$footer] ${TIMER_PROGRESS_PERCENT}%"
+                    [ "$kind" != B ] || progress_text+=" (aprox.)"
+                    eta_text="calculando..."
+                    if [ -n "$TIMER_PROGRESS_ETA" ]; then eta_text="~$(timer_format_duration "$TIMER_PROGRESS_ETA")"; fi
+                    if [ "$result" = running ] && (( done >= total )); then eta_text="finalizando..."; fi
+                fi
+                [ "$result" != failed ] || eta_text="operação falhou"
+            fi
+            label=${label:0:$((columns - 7))}
+            footer="Restante da etapa: $eta_text"; footer=${footer:0:$columns}
+            progress_text=${progress_text:0:$((columns - 11))}
+            printf '\0337\033[%s;1H\033[2KEtapa: %s\033[%s;1H\033[2KProgresso: %s\033[%s;1H\033[2KDecorrido etapa: %s\033[%s;1H\033[2KDecorrido total: %s\033[%s;1H\033[2K%s\0338' \
+                "$((rows - 4))" "$label" "$((rows - 3))" "$progress_text" \
+                "$((rows - 2))" "$(timer_format_duration "$step_elapsed")" \
+                "$((rows - 1))" "$(timer_format_duration "$total_elapsed")" "$rows" "$footer" >&9
         fi
         sleep 1
     done
@@ -133,6 +349,9 @@ timer_live_start() {
     local attempt=0
 
     [ "$TIMER_LIVE_ACTIVE" -eq 0 ] || return 0
+    if [ ! -t 1 ] || [ ! -t 2 ] || [ "${TERM:-dumb}" = dumb ]; then
+        return 0 # Redirecionamento/logs: nenhuma atualizacao ou escape ANSI.
+    fi
     if [ ! -c /dev/tty ] || ! { : </dev/tty; } 2>/dev/null; then
         log_warning "Timer ao vivo: /dev/tty indisponível; recurso desabilitado sem interromper a instalação."
         return 0
@@ -142,18 +361,21 @@ timer_live_start() {
         return 0
     }
     read -r rows columns <<< "$size"
-    if [ "$rows" -lt 10 ] || [ "$columns" -lt 32 ]; then
+    if [ "$rows" -lt 14 ] || [ "$columns" -lt 50 ]; then
         log_warning "Timer ao vivo: terminal pequeno (${rows}x${columns}); recurso desabilitado."
         return 0
     fi
 
-    TIMER_LIVE_STATE_FILE=$(mktemp /tmp/pmjs-timer-live.XXXXXX) || {
+    TIMER_LIVE_STATE_DIR=$(mktemp -d /tmp/pmjs-timer-live.XXXXXX) || {
         log_warning "Timer ao vivo: falha não fatal ao criar arquivo de estado."
         return 0
     }
+    TIMER_LIVE_STATE_FILE="${TIMER_LIVE_STATE_DIR}/state"
     TIMER_LIVE_ACTIVE=1
     timer_live_publish_state || {
         rm -f -- "$TIMER_LIVE_STATE_FILE"
+        rmdir -- "$TIMER_LIVE_STATE_DIR" 2>/dev/null || true
+        TIMER_LIVE_STATE_DIR=""
         TIMER_LIVE_STATE_FILE=""
         TIMER_LIVE_ACTIVE=0
         log_warning "Timer ao vivo: falha não fatal ao publicar estado inicial."
@@ -178,6 +400,7 @@ timer_live_start() {
 timer_live_stop() {
     local reason="${1:-encerramento normal}"
     local pid="${TIMER_LIVE_PID:-}"
+    local safe_state=1
 
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         kill -TERM "$pid" 2>/dev/null || true
@@ -186,11 +409,25 @@ timer_live_stop() {
     if [ "$TIMER_LIVE_ACTIVE" -eq 1 ]; then
         log_info "Timer ao vivo: encerramento solicitado ($reason)."
     fi
-    if [ -n "$TIMER_LIVE_STATE_FILE" ]; then
-        rm -f -- "$TIMER_LIVE_STATE_FILE" "${TIMER_LIVE_STATE_FILE}.ready"
+    if [ -n "${TIMER_LIVE_STATE_DIR:-}" ]; then
+        if ! [[ "$TIMER_LIVE_STATE_DIR" =~ ^/tmp/pmjs-timer-live\.[A-Za-z0-9]+$ &&
+                "$TIMER_LIVE_STATE_FILE" == "$TIMER_LIVE_STATE_DIR/state" &&
+                -d "$TIMER_LIVE_STATE_DIR" && ! -L "$TIMER_LIVE_STATE_DIR" && -O "$TIMER_LIVE_STATE_DIR" ]]; then
+            safe_state=0
+            log_warning "Timer: workspace inconsistente; nenhum arquivo de estado removido."
+        fi
+    fi
+    if [ "$safe_state" -eq 1 ] && [ -n "$TIMER_LIVE_STATE_FILE" ]; then
+        rm -f -- "$TIMER_LIVE_STATE_FILE" "${TIMER_LIVE_STATE_FILE}.ready" "${TIMER_LIVE_STATE_FILE}.progress"
+    fi
+    if [ "$safe_state" -eq 1 ] && [ -n "${TIMER_LIVE_STATE_DIR:-}" ]; then
+        if ! rmdir -- "$TIMER_LIVE_STATE_DIR"; then
+            log_warning "Timer: workspace temporario nao vazio; mantido para cleanup seguro: $TIMER_LIVE_STATE_DIR"
+        fi
     fi
     TIMER_LIVE_PID=""
     TIMER_LIVE_STATE_FILE=""
+    TIMER_LIVE_STATE_DIR=""
     TIMER_LIVE_ACTIVE=0
 }
 
@@ -222,6 +459,7 @@ timer_step_start() {
     TIMER_STEP_LABELS["$step_id"]="$label"
     TIMER_STEP_ORDER+=("$step_id")
     log_info "Timer da etapa iniciado: $label."
+    if [ -n "${TIMER_LIVE_STATE_FILE:-}" ]; then rm -f -- "${TIMER_LIVE_STATE_FILE}.progress"; fi
     if [ "$TIMER_LIVE_ACTIVE" -eq 1 ]; then
         log_info "Timer ao vivo: troca de etapa para $label."
         timer_live_publish_state || {

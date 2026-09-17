@@ -260,7 +260,7 @@ test_repository_access_includes_vscode() (
 )
 
 test_project_structure() {
-    check_project_structure
+    check_project_structure || return 1
     [[ -f "${PROJECT_ROOT}/config-live/includes.chroot/opt/pmjs/README.md" ]]
     [[ -x "${PROJECT_ROOT}/config-live/hooks/live/010-pmjs-baseline.hook.chroot" ]]
 }
@@ -278,12 +278,12 @@ test_controlled_snapshots() {
     local image_builder="${PROJECT_ROOT}/config-live/includes.chroot/opt/pmjs/image-builder"
     local forbidden
 
-    assert_snapshot_file_set "$deploy" DEPLOY_RUNTIME_FILES
-    assert_snapshot_file_set "$image_builder" IMAGE_BUILDER_RUNTIME_FILES
-    grep -Eq '^version=2\.0\.0-dev$' "$deploy/SNAPSHOT"
-    grep -Eq '^version=0\.2\.0$' "$image_builder/SNAPSHOT"
-    grep -Eq '^source_commit=[0-9a-f]{40}$' "$deploy/SNAPSHOT"
-    grep -Eq '^source_commit=[0-9a-f]{40}$' "$image_builder/SNAPSHOT"
+    assert_snapshot_file_set "$deploy" DEPLOY_RUNTIME_FILES || return 1
+    assert_snapshot_file_set "$image_builder" IMAGE_BUILDER_RUNTIME_FILES || return 1
+    grep -Fxq "version=$(tr -d '[:space:]' < "$deploy/VERSION")" "$deploy/SNAPSHOT" || return 1
+    grep -Fxq "version=$(tr -d '[:space:]' < "$image_builder/VERSION")" "$image_builder/SNAPSHOT" || return 1
+    grep -Eq '^source_commit=[0-9a-f]{40}$' "$deploy/SNAPSHOT" || return 1
+    grep -Eq '^source_commit=[0-9a-f]{40}$' "$image_builder/SNAPSHOT" || return 1
     forbidden=$(find "$deploy" "$image_builder" \
         \( -name .git -o -name logs -o -name cache -o -name output -o \
            -name work -o -name tests -o -name pmjs-images -o -name staging -o \
@@ -315,9 +315,9 @@ test_wrappers_and_launchers() {
 
 test_branding_and_renoir_recipe() {
     local include="${PROJECT_ROOT}/config-live/includes.chroot"
-    [[ "$(file -b --mime-type "$include/usr/share/pixmaps/pmjs-deploy.png")" == image/png ]]
-    [[ "$(file -b --mime-type "$include/usr/share/pixmaps/pmjs-image-builder.png")" == image/png ]]
-    [[ "$(file -b --mime-type "$include/usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg")" == image/jpeg ]]
+    [[ "$(file -b --mime-type "$include/usr/share/pixmaps/pmjs-deploy.png")" == image/png ]] || return 1
+    [[ "$(file -b --mime-type "$include/usr/share/pixmaps/pmjs-image-builder.png")" == image/png ]] || return 1
+    [[ "$(file -b --mime-type "$include/usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg")" == image/jpeg ]] || return 1
     grep -Fq "picture-filename='/usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg'" \
         "$include/usr/share/glib-2.0/schemas/90_pmjs-live.gschema.override"
     grep -Fq 'firmware-amd-graphics' \
@@ -346,7 +346,7 @@ test_live_polish() {
 test_preflight_components() {
     load_live_config "${PROJECT_ROOT}/config/live.conf"
     validate_config
-    check_project_structure
+    check_project_structure || return 1
     check_free_space
     [[ -n "$(detect_host)" ]]
 }

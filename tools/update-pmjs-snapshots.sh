@@ -15,7 +15,6 @@ readonly -a DEPLOY_RUNTIME_FILES=(
     VERSION
     deploy.sh
     config/deploy.conf
-    assets/auto-mirror-x11
     lib/chroot_boot.sh
     lib/disks.sh
     lib/extract.sh
