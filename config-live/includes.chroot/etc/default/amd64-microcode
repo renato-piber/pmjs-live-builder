@@ -1,0 +1,2 @@
+# Incluir AMD no early initrd mesmo quando o host de build for Intel.
+AMD64UCODE_INITRAMFS=early

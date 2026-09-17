@@ -175,9 +175,10 @@ validate_runtime_snapshot() {
     }
     forbidden="$(find "${directory}" \
         \( -name .git -o -name logs -o -name cache -o -name output -o \
-           -name work -o -name tests -o -name '*.partial' -o \
+           -name work -o -name tests -o -name pmjs-images -o -name staging -o \
+           -name outputs -o -name '.*.build.*' -o -name '.*.sync.*' -o -name '*.partial' -o \
            -name 'rootfs.tar.*' -o -name 'homefs.tar.*' -o \
-           -name 'pmjs-linux-*' \) -print -quit)"
+           -name 'pmjs-linux-*' -o -size +20M \) -print -quit)"
     [[ -z "${forbidden}" ]] || {
         printf 'Artefato proibido no snapshot: %s\n' "${forbidden}" >&2
         return 1

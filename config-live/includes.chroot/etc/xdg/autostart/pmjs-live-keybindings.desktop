@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PMJS Live — atalhos de teclado
+Exec=/usr/local/libexec/pmjs-live-keybindings
+TryExec=/usr/local/libexec/pmjs-live-keybindings
+OnlyShowIn=MATE;
+NoDisplay=true
+Terminal=false

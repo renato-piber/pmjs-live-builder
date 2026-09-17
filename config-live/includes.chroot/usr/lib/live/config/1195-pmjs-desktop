@@ -1,0 +1,50 @@
+#!/bin/bash
+# Executado pelo live-config depois de 0030-user-setup, antes da sessao grafica.
+set -eu
+
+pmjs_install_desktop() {
+    local applications=$1 home=$2 uid=$3 gid=$4 source target i
+    local -a sources=(pmjs-deploy pmjs-image-builder firefox-esr gparted)
+    local -a names=('PMJS Deploy' 'PMJS Image Builder' 'Firefox ESR' 'GParted')
+    [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || return 1
+    [[ -d "$home" && ! -L "$home" && "$(realpath -e -- "$home")" == "$home" ]] || return 1
+    [[ ! -L "$home/Desktop" ]] || return 1
+    # Validar todos os destinos antes de alterar qualquer launcher.
+    for i in "${!sources[@]}"; do
+        source="$applications/${sources[$i]}.desktop"
+        target="$home/Desktop/${names[$i]}.desktop"
+        [[ -f "$source" && ! -L "$source" && ! -d "$target" ]] || return 1
+        [[ ! -e "$target" || -f "$target" || -L "$target" ]] || return 1
+    done
+    install -d -m 0755 -o "$uid" -g "$gid" -- "$home/Desktop"
+    for i in "${!sources[@]}"; do
+        source="$applications/${sources[$i]}.desktop"
+        target="$home/Desktop/${names[$i]}.desktop"
+        # Nunca seguir um launcher legado que aponte para um arquivo de root.
+        if [[ -e "$target" || -L "$target" ]]; then unlink -- "$target"; fi
+        install -m 0755 -o "$uid" -g "$gid" -- "$source" "$target"
+    done
+}
+
+pmjs_desktop_main() {
+    local parameter entry user password uid gid gecos home shell
+    . /usr/lib/live/config.sh
+    component_was_executed pmjs-desktop && return 0
+    user=${LIVE_USERNAME:-user}
+    # Os componentes live-config sao processos separados: interpretar username.
+    for parameter in ${LIVE_CONFIG_CMDLINE:-}; do
+        case "$parameter" in
+            username=*|live-config.username=*) user=${parameter#*username=} ;;
+        esac
+    done
+    [[ "$user" =~ ^[a-z_][a-z0-9_-]*$ ]] || return 1
+    entry=$(getent passwd "$user") || return 1
+    IFS=: read -r user password uid gid gecos home shell <<< "$entry"
+    [[ "$uid" =~ ^[0-9]+$ && "$uid" -gt 0 && "$home" == /home/* && "$home" != /home/ ]] || return 1
+    pmjs_install_desktop /usr/share/applications "$home" "$uid" "$gid" || return 1
+    touch /var/lib/live/config/pmjs-desktop
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    pmjs_desktop_main
+fi

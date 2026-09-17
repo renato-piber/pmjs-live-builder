@@ -12,6 +12,10 @@ test -f /usr/share/applications/pmjs-image-builder.desktop
 test -f /usr/share/pixmaps/pmjs-deploy.png
 test -f /usr/share/pixmaps/pmjs-image-builder.png
 test -f /usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg
+test -f /etc/firefox/policies/policies.json
+test -f /usr/share/applications/firefox-esr.desktop
+test -f /usr/share/applications/gparted.desktop
+test -x /usr/bin/flameshot
 
 chmod 0755 /opt/pmjs/deploy/deploy.sh \
     /opt/pmjs/deploy/assets/auto-mirror-x11 \
@@ -20,7 +24,9 @@ chmod 0755 /opt/pmjs/deploy/deploy.sh \
     /opt/pmjs/image-builder/sync-image-to-ventoy.sh \
     /usr/local/bin/pmjs-deploy /usr/local/bin/pmjs-image-builder \
     /usr/share/applications/pmjs-deploy.desktop \
-    /usr/share/applications/pmjs-image-builder.desktop
+    /usr/share/applications/pmjs-image-builder.desktop \
+    /usr/lib/live/config/1195-pmjs-desktop \
+    /usr/local/libexec/pmjs-live-keybindings
 chmod 0644 /usr/share/pixmaps/pmjs-deploy.png \
     /usr/share/pixmaps/pmjs-image-builder.png \
     /usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg \

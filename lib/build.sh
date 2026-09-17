@@ -364,6 +364,8 @@ validate_live_filesystem() {
         usr/bin/jq
         usr/bin/pluma
         usr/bin/code
+        usr/bin/flameshot
+        usr/lib/firefox-esr/firefox-esr
         usr/bin/filezilla
         usr/sbin/gparted
         usr/bin/gnome-disks
@@ -384,6 +386,15 @@ validate_live_filesystem() {
         opt/pmjs/image-builder/lib/metadata.sh
         usr/share/applications/pmjs-deploy.desktop
         usr/share/applications/pmjs-image-builder.desktop
+        usr/share/applications/firefox-esr.desktop
+        usr/share/applications/gparted.desktop
+        usr/lib/live/config/1195-pmjs-desktop
+        usr/local/libexec/pmjs-live-keybindings
+        etc/firefox/policies/policies.json
+        etc/xdg/autostart/pmjs-live-keybindings.desktop
+        etc/skel/.config/user-dirs.dirs
+        etc/default/intel-microcode
+        etc/default/amd64-microcode
         usr/share/pixmaps/pmjs-deploy.png
         usr/share/pixmaps/pmjs-image-builder.png
         usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg
@@ -410,6 +421,18 @@ validate_live_filesystem() {
         fi
     done
     ui_ok "Todos os ${#required_paths[@]} arquivos criticos, incluindo aplicativos PMJS e firmware Renoir, foram encontrados no SquashFS"
+}
+
+validate_early_microcode() {
+    local initrd count=0
+    while IFS= read -r -d '' initrd; do
+        python3 "${PROJECT_ROOT}/tools/validate-early-microcode.py" "$initrd" || {
+            die "Validacao early microcode falhou: $initrd"
+            return 1
+        }
+        count=$((count + 1))
+    done < <(find "${WORK_DIR_ABS}/binary/live" -maxdepth 1 -type f -name 'initrd.img*' -print0)
+    (( count > 0 )) || { die "Nenhum initrd para validar early microcode."; return 1; }
 }
 
 publish_iso() {
@@ -448,6 +471,7 @@ run_build_pipeline() {
     ui_step "Validando artefato antes da publicacao"
     smoke_test_iso "$built_iso"
     validate_live_filesystem "${WORK_DIR_ABS}/binary/live/filesystem.squashfs"
+    validate_early_microcode
     publish_iso "$built_iso"
     ui_ok "Build concluido: $PUBLISHED_ISO"
 }

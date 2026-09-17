@@ -16,8 +16,11 @@ O `live-build` gera uma ISO hibrida com GRUB para UEFI e Legacy BIOS. Secure Boo
 fica em modo `auto`: a disponibilidade de binarios assinados e validada durante o
 build, mas nao e uma garantia desta Sprint.
 
-Plymouth, navegador e autostart nao fazem parte desta fase. O fluxo de build,
-LightDM, Xorg, kernel e boot nao recebeu contornos especificos para hardware.
+Firefox ESR usa proxy institucional com autenticacao interativa. Flameshot e
+integrado ao menu MATE e ao atalho Super+Shift+S. O Desktop contem somente PMJS
+Deploy, PMJS Image Builder, Firefox ESR e GParted, com arquivos do usuario Live.
+Plymouth nao faz parte desta fase; LightDM, autologin, Xorg, kernel e GRUB foram
+preservados. Veja a [auditoria e acabamento da Live](docs/LIVE_POLISH.md).
 
 ## Suite Debian
 
@@ -43,7 +46,7 @@ Em um HOST Debian 13:
 
 ```bash
 sudo apt update
-sudo apt install live-build debootstrap xorriso squashfs-tools curl ca-certificates desktop-file-utils file
+sudo apt install live-build debootstrap xorriso squashfs-tools curl ca-certificates desktop-file-utils file python3
 ```
 
 O build requer root, pelo menos 20 GiB livres (ajustavel em `config/live.conf`) e
@@ -64,12 +67,13 @@ sudo ./build-live.sh
 
 Fluxo: preflight, preparacao protegida de `work/`, conexao do cache persistente,
 `lb config`, aplicacao da configuracao versionada, `lb build`, smoke test
-estrutural, validacao dos executaveis, publicacao atomica e SHA-256. A saida
+estrutural, validacao dos executaveis e do early microcode Intel/AMD,
+publicacao atomica e SHA-256. A saida
 completa do `live-build` aparece no terminal e fica em `logs/`.
 Somente uma ISO validada e copiada para:
 
 ```text
-output/pmjs-live-0.1.1-amd64.iso
+output/pmjs-live-0.1.2-amd64.iso
 output/SHA256SUMS
 ```
 
@@ -144,7 +148,7 @@ Testes rapidos, sem construir ISO nem baixar pacotes:
 Smoke test de uma ISO existente:
 
 ```bash
-./build-live.sh --smoke-test output/pmjs-live-0.1.1-amd64.iso
+./build-live.sh --smoke-test output/pmjs-live-0.1.2-amd64.iso
 ```
 
 Durante um build, o Builder tambem inspeciona o SquashFS intermediario com
@@ -168,6 +172,12 @@ sessao (Marco, painel, configuracoes e Caja), acompanhado explicitamente de Xorg
 LightDM, terminal e integracao do NetworkManager. `--apt-recommends false` evita a
 colecao ampla de aplicativos sugeridos; as dependencias necessarias sao listadas
 explicitamente por categoria em `config-live/package-lists/`.
+
+Os defaults de microcode desativam a selecao pela CPU do HOST e incluem Intel e
+AMD no CPIO nao comprimido anterior ao initrd principal. O `live-build` regenera
+o initrd depois dos includes/hooks. Antes da publicacao, cada initrd precisa
+passar por `tools/validate-early-microcode.py`; a auditoria e os limites desse
+teste estao em [LIVE_POLISH.md](docs/LIVE_POLISH.md).
 
 Firmware de grafico AMD/Intel e de rede Intel, Realtek, Atheros, Broadcom e
 MediaTek foi incluido pela area Debian `non-free-firmware`; a baseline tambem

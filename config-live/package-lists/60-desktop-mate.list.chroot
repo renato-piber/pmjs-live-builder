@@ -9,9 +9,11 @@ mate-terminal
 caja
 mate-polkit
 libglib2.0-bin
+xdg-user-dirs
 pluma
 filezilla
 firefox-esr
 gparted
 gnome-disk-utility
 code
+flameshot

@@ -124,8 +124,8 @@ missing_commands() {
 check_required_commands() {
     local missing_output
     if ! missing_output=$(missing_commands lb debootstrap xorriso mksquashfs unsquashfs \
-        sha256sum realpath findmnt desktop-file-validate file); then
-        die "Dependencias ausentes no HOST: ${missing_output//$'\n'/, }. Instale: live-build debootstrap xorriso squashfs-tools desktop-file-utils file."
+        sha256sum realpath findmnt desktop-file-validate file python3); then
+        die "Dependencias ausentes no HOST: ${missing_output//$'\n'/, }. Instale: live-build debootstrap xorriso squashfs-tools desktop-file-utils file python3."
     fi
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
         die "Preflight de rede requer curl ou wget no HOST."
@@ -212,6 +212,13 @@ check_embedded_pmjs_runtime() {
         usr/share/pixmaps/pmjs-image-builder.png
         usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg
         usr/share/glib-2.0/schemas/90_pmjs-live.gschema.override
+        usr/lib/live/config/1195-pmjs-desktop
+        usr/local/libexec/pmjs-live-keybindings
+        etc/xdg/autostart/pmjs-live-keybindings.desktop
+        etc/skel/.config/user-dirs.dirs
+        etc/firefox/policies/policies.json
+        etc/default/intel-microcode
+        etc/default/amd64-microcode
     )
 
     for path in "${required_paths[@]}"; do
@@ -227,26 +234,23 @@ check_embedded_pmjs_runtime() {
         opt/pmjs/image-builder/publish-image.sh \
         opt/pmjs/image-builder/sync-image-to-ventoy.sh \
         usr/local/bin/pmjs-deploy \
-        usr/local/bin/pmjs-image-builder; do
+        usr/local/bin/pmjs-image-builder \
+        usr/lib/live/config/1195-pmjs-desktop \
+        usr/local/libexec/pmjs-live-keybindings; do
         [[ -x "${include_root}/${path}" ]] || {
             die "Executavel integrado sem permissao de execucao: ${path}"
             return 1
         }
     done
 
-    [[ "$(readlink -- "${include_root}/etc/skel/Desktop/PMJS Deploy.desktop")" == \
-       /usr/share/applications/pmjs-deploy.desktop ]] || {
-        die "Atalho do Desktop para PMJS Deploy ausente ou incorreto."
-        return 1
-    }
-    [[ "$(readlink -- "${include_root}/etc/skel/Desktop/PMJS Image Builder.desktop")" == \
-       /usr/share/applications/pmjs-image-builder.desktop ]] || {
-        die "Atalho do Desktop para PMJS Image Builder ausente ou incorreto."
+    [[ -z "$(find "${include_root}/etc/skel" -name '*.desktop' -print -quit)" ]] || {
+        die "Launchers do Desktop devem ser instalados pelo live-config, nao por links no skel."
         return 1
     }
     desktop-file-validate \
         "${include_root}/usr/share/applications/pmjs-deploy.desktop" \
-        "${include_root}/usr/share/applications/pmjs-image-builder.desktop" || {
+        "${include_root}/usr/share/applications/pmjs-image-builder.desktop" \
+        "${include_root}/etc/xdg/autostart/pmjs-live-keybindings.desktop" || {
         die "Launcher .desktop invalido."
         return 1
     }
@@ -260,7 +264,8 @@ check_embedded_pmjs_runtime() {
     forbidden="$(find "${include_root}/opt/pmjs/deploy" \
         "${include_root}/opt/pmjs/image-builder" \
         \( -name .git -o -name logs -o -name cache -o -name output -o \
-           -name work -o -name tests -o -name '*.partial' -o \
+           -name work -o -name tests -o -name pmjs-images -o -name staging -o \
+           -name outputs -o -name '.*.build.*' -o -name '.*.sync.*' -o -name '*.partial' -o \
            -name 'rootfs.tar.*' -o -name 'homefs.tar.*' -o \
            -name 'pmjs-linux-*' -o -size +20M \) -print -quit)"
     [[ -z "${forbidden}" ]] || {

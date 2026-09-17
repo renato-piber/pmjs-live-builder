@@ -210,7 +210,7 @@ test_package_lists() {
         firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211
         firmware-mediatek firmware-intel-misc firmware-bnx2
         firmware-amd-graphics firmware-intel-graphics firmware-linux-free
-        amd64-microcode intel-microcode
+        amd64-microcode intel-microcode flameshot firefox-esr xdg-user-dirs
     )
     all_lists=$(find "${PROJECT_ROOT}/config-live/package-lists" -maxdepth 1 -type f -name '*.list.chroot' -print | sort)
     [[ -n "$all_lists" ]]
@@ -286,7 +286,8 @@ test_controlled_snapshots() {
     grep -Eq '^source_commit=[0-9a-f]{40}$' "$image_builder/SNAPSHOT"
     forbidden=$(find "$deploy" "$image_builder" \
         \( -name .git -o -name logs -o -name cache -o -name output -o \
-           -name work -o -name tests -o -name '*.partial' -o \
+           -name work -o -name tests -o -name pmjs-images -o -name staging -o \
+           -name outputs -o -name '.*.build.*' -o -name '.*.sync.*' -o -name '*.partial' -o \
            -name 'rootfs.tar.*' -o -name 'homefs.tar.*' -o \
            -name 'pmjs-linux-*' -o -size +20M \) -print -quit)
     [[ -z "$forbidden" ]]
@@ -309,10 +310,7 @@ test_wrappers_and_launchers() {
         grep -Eq "^Icon=${desktop}$" "$include/usr/share/applications/$desktop.desktop"
         grep -Eq '^Terminal=true$' "$include/usr/share/applications/$desktop.desktop"
     done
-    [[ "$(readlink -- "$include/etc/skel/Desktop/PMJS Deploy.desktop")" == \
-       /usr/share/applications/pmjs-deploy.desktop ]]
-    [[ "$(readlink -- "$include/etc/skel/Desktop/PMJS Image Builder.desktop")" == \
-       /usr/share/applications/pmjs-image-builder.desktop ]]
+    [[ -z "$(find "$include/etc/skel" -name '*.desktop' -print -quit)" ]]
 }
 
 test_branding_and_renoir_recipe() {
@@ -337,6 +335,12 @@ test_shell_syntax() {
     sh -n "${PROJECT_ROOT}/config-live/hooks/live/010-pmjs-baseline.hook.chroot"
     sh -n "${PROJECT_ROOT}/config-live/includes.chroot/usr/local/bin/pmjs-deploy"
     sh -n "${PROJECT_ROOT}/config-live/includes.chroot/usr/local/bin/pmjs-image-builder"
+    bash -n "${PROJECT_ROOT}/config-live/includes.chroot/usr/lib/live/config/1195-pmjs-desktop"
+    sh -n "${PROJECT_ROOT}/config-live/includes.chroot/usr/local/libexec/pmjs-live-keybindings"
+}
+
+test_live_polish() {
+    PYTHONDONTWRITEBYTECODE=1 python3 "${PROJECT_ROOT}/tests/test_live_polish.py"
 }
 
 test_preflight_components() {
@@ -390,6 +394,7 @@ run_test 'sintaxe dos scripts e hook' test_shell_syntax
 run_test 'componentes nao destrutivos do preflight' test_preflight_components
 run_test 'opcoes criticas do live-build' test_live_build_options
 run_test 'python3 na receita e na validacao pos-build' test_python_recipe_and_validation
+run_test 'proxy, Desktop, atalho, snapshots e early microcode (regressoes)' test_live_polish
 
 printf '1..%d\n' "$tests_run"
 if (( tests_failed > 0 )); then

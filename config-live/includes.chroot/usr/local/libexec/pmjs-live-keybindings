@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+# Autostart da sessao MATE: grava somente o atalho PMJS no dconf deste usuario.
+[ "$(id -u)" -ne 0 ] || exit 1
+schema='org.mate.control-center.keybinding:/org/mate/desktop/keybindings/pmjs-flameshot/'
+gsettings set "$schema" name 'Captura de tela (Flameshot)'
+gsettings set "$schema" action 'flameshot gui'
+gsettings set "$schema" binding '<Super><Shift>s'

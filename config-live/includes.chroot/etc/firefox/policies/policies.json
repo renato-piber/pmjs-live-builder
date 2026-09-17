@@ -1,0 +1,13 @@
+{
+  "policies": {
+    "OfferToSaveLogins": false,
+    "Proxy": {
+      "Mode": "manual",
+      "Locked": false,
+      "HTTPProxy": "proxy.empresa.local:8080",
+      "SSLProxy": "proxy.empresa.local:8080",
+      "UseHTTPProxyForAllProtocols": true,
+      "AutoLogin": false
+    }
+  }
+}

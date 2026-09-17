@@ -1,0 +1,2 @@
+# Caminho consistente com o componente live-config PMJS e com o Caja.
+XDG_DESKTOP_DIR="$HOME/Desktop"

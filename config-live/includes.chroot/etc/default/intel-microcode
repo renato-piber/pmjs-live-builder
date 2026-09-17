@@ -1,0 +1,4 @@
+# ISO portavel: nao selecionar atualizacoes pela CPU da maquina de build.
+IUCODE_TOOL_INITRAMFS=early
+IUCODE_TOOL_SCANCPUS=no
+IUCODE_TOOL_EXTRA_OPTIONS=

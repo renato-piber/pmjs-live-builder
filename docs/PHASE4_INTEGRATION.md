@@ -67,11 +67,11 @@ autenticacao normal, os argumentos e o codigo de saida sao preservados e nao ha
 regra `NOPASSWD`, setuid ou politica paralela de privilegios.
 
 Os launchers em `/usr/share/applications` aparecem no menu MATE, usam nomes de
-icone instalados e abrem um terminal. Os atalhos em `/etc/skel/Desktop` sao links
-para esses launchers de sistema, executaveis e controlados por root. Isso evita
-depender do atributo de confianca gravado por usuario via `gio`. A aceitacao
-visual ainda deve ser confirmada em um boot real, pois a apresentacao de atalhos
-pode variar com a versao do Caja/MATE.
+icone instalados e abrem um terminal. A revisao de acabamento substituiu os
+antigos links de `/etc/skel/Desktop` por copias regulares instaladas pelo
+componente `1195-pmjs-desktop` depois da criacao do usuario Live. Os quatro
+launchers pertencem ao UID/GID desse usuario e usam modo 0755. Veja a auditoria
+de ownership e confianca do Caja em [LIVE_POLISH.md](LIVE_POLISH.md).
 
 ## Branding
 
@@ -140,7 +140,7 @@ git diff --check
 ```
 
 Os testes verificam a lista exata dos snapshots, exclusoes, limites de tamanho,
-permissoes, wrappers, launchers, links do Desktop, MIME dos assets, override do
+permissoes, wrappers, launchers, ownership do Desktop, MIME dos assets, override do
 wallpaper, repositorio/chave do Visual Studio Code, pacotes sem duplicidade e
 receita/validacao Renoir. O build completo
 continua sendo necessario antes de uma release para comprovar a resolucao APT,

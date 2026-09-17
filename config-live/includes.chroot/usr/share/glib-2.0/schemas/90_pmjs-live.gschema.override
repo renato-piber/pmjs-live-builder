@@ -1,3 +1,11 @@
 [org.mate.background]
 picture-filename='/usr/share/backgrounds/pmjs/pmjs-wallpaper.jpg'
 picture-options='zoom'
+
+# Somente os quatro launchers instalados pelo live-config no Desktop.
+[org.mate.caja.desktop]
+computer-icon-visible=false
+home-icon-visible=false
+trash-icon-visible=false
+volumes-visible=false
+network-icon-visible=false
