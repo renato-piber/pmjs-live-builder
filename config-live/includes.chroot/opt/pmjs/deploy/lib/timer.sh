@@ -12,6 +12,283 @@ declare -a TIMER_STEP_ORDER=()
 declare -A TIMER_STEP_LABELS=()
 declare -A TIMER_STEP_DURATIONS=()
 
+# Modelo separado da segurança/execução: falhas de telemetria são não fatais.
+TIMER_ETA_WORKSPACE=""
+TIMER_ETA_KEY=""
+TIMER_ETA_FAILED=0
+TIMER_ETA_COMPLETE=0
+declare -a TIMER_ETA_PLAN=(validation legacy_preflight home_preflight archive_preflight partitioning filesystems mounts extraction system_config home_post_validation boot)
+declare -A TIMER_ETA_BASE_STEPS=()
+declare -A TIMER_ETA_BASE_OPERATIONS=()
+
+timer_eta_cleanup() {
+    local directory=${TIMER_ETA_WORKSPACE:-}
+    if [[ "$directory" =~ ^/tmp/pmjs-eta\.[A-Za-z0-9]+$ ]] &&
+       [[ -d "$directory" && ! -L "$directory" && -O "$directory" ]]; then
+        rm -f -- "$directory/baseline" "$directory/operations" "$directory/steps" 2>/dev/null || true
+        rmdir -- "$directory" 2>/dev/null || true
+    fi
+    TIMER_ETA_WORKSPACE=""
+}
+
+# A chave usa metadados, nunca uma leitura extra dos archives. Não inclui a
+# identidade institucional da máquina. Sem identificação, não reutiliza modelo.
+timer_eta_context() {
+    local disk="" source=""
+    disk=$(lsblk -dnbo MODEL,SIZE,ROTA,TRAN -- "${INSTALL_DISK:-}" 2>/dev/null) || return 1
+    [ -n "$disk" ] || return 1
+    source=$(findmnt -rn -o SOURCE,FSTYPE --target "${INSTALL_IMAGE_DIR:-}" 2>/dev/null) || return 1
+    [ -n "$source" ] || return 1
+    python3 - "${INSTALL_IMAGE_DIR:-}" "${INSTALL_STORAGE_MODE:-}" "${INSTALL_BOOT_MODE:-}" \
+        "${IMAGES_SOURCE:-}" "$disk" "$source" "${VERSION:-}" <<'PY'
+import hashlib, json, os, pathlib, stat, sys
+directory, storage, boot, origin, disk, source, version = sys.argv[1:]
+root = pathlib.Path(directory)
+if not root.is_dir() or storage not in ('clean', 'preserve_home') or boot not in ('uefi', 'legacy'):
+    raise ValueError('contexto incompleto')
+identity = {}
+manifest = root / 'manifest.json'
+if manifest.exists():
+    if manifest.is_symlink() or manifest.stat().st_size > 65536:
+        raise ValueError('manifest inseguro')
+    data = manifest.read_bytes()
+    descriptor = json.loads(data)
+    if descriptor.get('schema_version') != 1:
+        raise ValueError('schema desconhecido')
+    identity['manifest'] = hashlib.sha256(data).hexdigest()
+    names = [descriptor[role]['filename'] for role in ('rootfs', 'homefs')]
+else:
+    names = ['rootfs.tar.gz'] + ([] if storage == 'preserve_home' else ['homefs.tar.gz'])
+for name in names:
+    if not isinstance(name, str) or pathlib.Path(name).name != name or name in ('.', '..'):
+        raise ValueError('nome inseguro')
+    info = (root / name).lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+        raise ValueError('archive inválido')
+    identity[name] = [info.st_size, info.st_mtime_ns]
+cpu = [line.strip() for line in pathlib.Path('/proc/cpuinfo').read_text().splitlines()
+       if line.startswith(('vendor_id', 'cpu family', 'model\t', 'model name'))][:4]
+if not cpu:
+    raise ValueError('CPU não identificado')
+context = [1, version, root.name, identity, storage, boot, origin, disk.strip(), source.strip(), cpu]
+print(hashlib.sha256(json.dumps(context, sort_keys=True).encode()).hexdigest())
+PY
+}
+
+# Histórico limitado, JSON sem código executável; lock e rename no mesmo FS.
+# A mesma rotina valida leitura e gravação. Arquivos/symlinks inseguros não são
+# seguidos; corrupção ou falta de permissões apenas desabilitam a referência.
+timer_eta_history() {
+    python3 - "$1" "${ETA_HISTORY_FILE:-}" "$TIMER_ETA_KEY" "$TIMER_ETA_WORKSPACE" \
+        "${TIMER_ETA_PLAN[*]}" <<'PY'
+import fcntl, json, os, pathlib, re, stat, statistics, sys, tempfile, time
+action, filename, key, workspace, plan_text = sys.argv[1:]
+plan = plan_text.split()
+path = pathlib.Path(filename)
+if not path.is_absolute() or '..' in path.parts or path.parent == pathlib.Path('/'):
+    raise ValueError('path de histórico inseguro')
+for ancestor in list(path.parents)[::-1]:
+    if ancestor.is_symlink():
+        raise ValueError('diretório symlink')
+    if ancestor.exists() and ancestor.stat().st_mode & stat.S_IWOTH:
+        # /tmp sticky é permitido para fixtures/diretórios privados filhos.
+        if not ancestor.stat().st_mode & stat.S_ISVTX or ancestor == path.parent:
+            raise ValueError('diretório gravável por terceiros')
+if action == 'save':
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+info = path.parent.stat()
+if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+    raise ValueError('diretório de histórico não privado')
+directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    fcntl.flock(directory_fd, (fcntl.LOCK_EX if action == 'save' else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+    history = {'schema': 1, 'profiles': {}}
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except FileNotFoundError:
+        pass
+    else:
+        with os.fdopen(fd) as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022 or info.st_size > 2 * 1024 * 1024:
+                raise ValueError('histórico inseguro')
+            history = json.load(stream)
+    if history.get('schema') != 1 or not isinstance(history.get('profiles'), dict) or len(history['profiles']) > 32:
+        raise ValueError('histórico inválido')
+    def valid_sample(sample):
+        if not isinstance(sample, dict) or set(sample.get('steps', {})) != set(plan):
+            return False
+        return (all(type(v) is int and 0 <= v <= 86400000 for v in sample['steps'].values())
+                and isinstance(sample.get('operations'), dict)
+                and len(sample['operations']) <= 128
+                and all(isinstance(k, str) and len(k) <= 256 and k.split('/', 1)[0] in plan
+                        and '/' in k and not any(ord(c) < 32 or c == '|' for c in k)
+                        and type(v) is int and 0 <= v <= 86400000
+                        for k, v in sample['operations'].items()))
+    for profile_key, profile in history['profiles'].items():
+        if not re.fullmatch('[0-9a-f]{64}', profile_key) or not isinstance(profile, dict):
+            raise ValueError('perfil inválido')
+        if type(profile.get('updated')) is not int or not isinstance(profile.get('samples'), list) or not 1 <= len(profile['samples']) <= 5:
+            raise ValueError('amostras inválidas')
+        if not all(valid_sample(sample) for sample in profile['samples']):
+            raise ValueError('amostra inválida')
+    if action == 'load':
+        samples = history['profiles'].get(key, {}).get('samples', [])
+        if samples:
+            for step in plan:
+                print('step|%s|%d' % (step, statistics.median(s['steps'][step] for s in samples)))
+            # Só usa operações presentes em todas as amostras comparáveis.
+            common = set.intersection(*(set(s['operations']) for s in samples))
+            for operation in sorted(common):
+                print('operation|%s|%d' % (operation, statistics.median(s['operations'][operation] for s in samples)))
+    elif action == 'save':
+        steps = {}
+        for line in (pathlib.Path(workspace) / 'steps').read_text().splitlines():
+            step, duration = line.split('|')
+            if step in steps:
+                raise ValueError('etapa duplicada')
+            steps[step] = int(duration)
+        operations = {}
+        repeated = set()
+        for line in (pathlib.Path(workspace) / 'operations').read_text().splitlines():
+            step, label, duration = line.split('|')
+            operation = step + '/' + label
+            # Labels repetidos não identificam uma ocorrência sem ambiguidade.
+            # Nesse caso, conserva apenas a referência da fase inteira.
+            if operation in operations:
+                operations.pop(operation)
+                repeated.add(operation)
+            elif operation not in repeated:
+                operations[operation] = int(duration)
+        sample = {'steps': steps, 'operations': operations}
+        if not valid_sample(sample):
+            raise ValueError('instalação incompleta')
+        samples = history['profiles'].get(key, {}).get('samples', [])
+        history['profiles'][key] = {'updated': int(time.time()), 'samples': (samples + [sample])[-5:]}
+        history['profiles'] = dict(sorted(history['profiles'].items(), key=lambda item: item[1]['updated'], reverse=True)[:32])
+        temporary = None
+        try:
+            fd, temporary = tempfile.mkstemp(prefix='.eta-history-', dir=path.parent)
+            with os.fdopen(fd, 'w') as stream:
+                json.dump(history, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            os.fsync(directory_fd)
+        finally:
+            if temporary is not None and os.path.exists(temporary):
+                os.unlink(temporary)
+finally:
+    os.close(directory_fd)
+PY
+}
+
+timer_eta_prepare() {
+    TIMER_ETA_BASE_STEPS=(); TIMER_ETA_BASE_OPERATIONS=()
+    TIMER_ETA_FAILED=0; TIMER_ETA_COMPLETE=0; TIMER_ETA_KEY=""
+    [ "${ETA_HISTORY_ENABLED:-0}" = 1 ] && [ "${INSTALL_EXECUTION_MODE:-}" = real ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    TIMER_ETA_KEY=$(timer_eta_context 2>/dev/null) || { TIMER_ETA_KEY=""; return 0; }
+    TIMER_ETA_WORKSPACE=$(mktemp -d /tmp/pmjs-eta.XXXXXX) || return 0
+    if ! { : > "$TIMER_ETA_WORKSPACE/operations"; : > "$TIMER_ETA_WORKSPACE/steps"; }; then
+        timer_eta_cleanup
+        return 0
+    fi
+    local kind="" name="" duration=""
+    if timer_eta_history load > "$TIMER_ETA_WORKSPACE/baseline" 2>/dev/null; then
+        while IFS='|' read -r kind name duration; do
+            [[ "$duration" =~ ^[0-9]+$ ]] || continue
+            case "$kind" in
+                step) TIMER_ETA_BASE_STEPS["$name"]=$duration ;;
+                operation) TIMER_ETA_BASE_OPERATIONS["$name"]=$duration ;;
+            esac
+        done < "$TIMER_ETA_WORKSPACE/baseline"
+    fi
+    if (( ${#TIMER_ETA_BASE_STEPS[@]} > 0 )); then
+        log_info "ETA global: referência aproximada de instalações concluídas comparáveis."
+    else
+        log_info "ETA global: sem histórico comparável; calculando até obter referência."
+    fi
+}
+
+timer_eta_record_operation() {
+    local label=$1 milliseconds=$2
+    [ -n "${TIMER_ETA_WORKSPACE:-}" ] && [ -n "${TIMER_CURRENT_STEP:-}" ] || return 0
+    [[ "$milliseconds" =~ ^[0-9]+$ ]] || return 0
+    label=${label//$'\n'/ }; label=${label//|/-}
+    printf '%s|%s|%s\n' "$TIMER_CURRENT_STEP" "$label" "$milliseconds" >> "$TIMER_ETA_WORKSPACE/operations" 2>/dev/null || true
+}
+
+timer_eta_finish() {
+    if [ -n "${TIMER_ETA_WORKSPACE:-}" ] && [ "$TIMER_ETA_FAILED" = 0 ] &&
+       [ "${INSTALL_EXECUTION_MODE:-}" = real ] && [ "${INSTALL_BOOT_READY:-0}" = 1 ]; then
+        if timer_eta_history save >/dev/null 2>&1; then
+            TIMER_ETA_COMPLETE=1
+            log_info "ETA global: histórico atualizado após instalação real concluída."
+        else
+            log_warning "ETA global: histórico não pôde ser atualizado; instalação não afetada."
+        fi
+    fi
+    timer_eta_cleanup
+}
+
+# Retorna segundos ou um estado explícito. Não calcula percentual global.
+timer_eta_estimate() {
+    local current=$1 elapsed=$2 label=${3:-} operation_elapsed=${4:-0} measured=${5:-} result=${6:-running}
+    local step="" seen=0 future=0 remaining=0 completed_base=0 completed_actual=0 outside=0
+    local recorded_step="" recorded_label="" duration=0 operation=""
+    TIMER_ETA_REMAINING=""; TIMER_ETA_STATUS="calculando..."
+    [ "$result" != failed ] || { TIMER_ETA_STATUS="operação falhou"; return 0; }
+    [[ "$elapsed" =~ ^[0-9]+$ && "$operation_elapsed" =~ ^[0-9]+$ ]] || return 0
+    [ -n "$current" ] || return 0
+    for step in "${TIMER_ETA_PLAN[@]}"; do
+        if [ "$step" = "$current" ]; then seen=1; fi
+        [ "$seen" = 1 ] || continue
+        [[ "${TIMER_ETA_BASE_STEPS[$step]:-}" =~ ^[0-9]+$ ]] || return 0
+        [ "$step" = "$current" ] || future=$((future + TIMER_ETA_BASE_STEPS[$step]))
+    done
+    [ "$seen" = 1 ] || return 0
+    if [ -f "${TIMER_ETA_WORKSPACE:-}/operations" ]; then
+        while IFS='|' read -r recorded_step recorded_label duration; do
+            [ "$recorded_step" = "$current" ] || continue
+            [[ "$duration" =~ ^[0-9]+$ ]] || continue
+            operation="$current/$recorded_label"
+            # Uma operação sem referência conserva o fallback por tempo da fase.
+            [[ "${TIMER_ETA_BASE_OPERATIONS[$operation]:-}" =~ ^[0-9]+$ ]] || continue
+            completed_actual=$((completed_actual + duration))
+            completed_base=$((completed_base + TIMER_ETA_BASE_OPERATIONS[$operation]))
+        done < "$TIMER_ETA_WORKSPACE/operations"
+    fi
+    remaining=$((TIMER_ETA_BASE_STEPS[$current] - completed_base - elapsed * 1000 + completed_actual))
+    operation="$current/$label"
+    if [ "$result" = running ] && [[ "$measured" =~ ^[0-9]+$ && "${TIMER_ETA_BASE_OPERATIONS[$operation]:-}" =~ ^[0-9]+$ ]]; then
+        outside=$((elapsed * 1000 - completed_actual - operation_elapsed))
+        (( outside >= 0 )) || outside=0
+        remaining=$((TIMER_ETA_BASE_STEPS[$current] - completed_base - TIMER_ETA_BASE_OPERATIONS[$operation] - outside))
+        (( remaining >= 0 )) || remaining=0
+        remaining=$((remaining + measured * 1000))
+    fi
+    if (( remaining <= 0 )); then
+        TIMER_ETA_STATUS="recalculando..."
+        return 0 # Não mascarar estouro da fase com a previsão das fases futuras.
+    fi
+    if [[ "$measured" =~ ^[0-9]+$ ]] && [ "$result" = running ]; then
+        (( remaining >= measured * 1000 )) || remaining=$((measured * 1000))
+    fi
+    TIMER_ETA_REMAINING=$(((future + remaining + 999) / 1000))
+    TIMER_ETA_STATUS="aproximado (histórico)"
+}
+
+timer_eta_smooth() {
+    local remaining=$1
+    [[ "$remaining" =~ ^[0-9]+$ ]] || { TIMER_ETA_SMOOTHED=""; return 0; }
+    if [[ "${TIMER_ETA_SMOOTHED:-}" =~ ^[0-9]+$ ]]; then
+        TIMER_ETA_SMOOTHED=$(((TIMER_ETA_SMOOTHED * 3 + remaining + 2) / 4))
+    else
+        TIMER_ETA_SMOOTHED=$remaining
+    fi
+}
+
 # Taxa EWMA em bytes/unidades por segundo; ETA somente apos aquecimento.
 timer_progress_reset() {
     TIMER_PROGRESS_LAST_DONE=0
@@ -64,6 +341,7 @@ timer_progress_update() {
 timer_progress_publish() {
     local token=$1 label=$2 kind=$3 done=$4 total=$5 milliseconds=$6 result=$7 started=$8
     local temporary=""
+    if [ "$result" = success ]; then timer_eta_record_operation "$label" "$milliseconds"; fi
     [ "${TIMER_LIVE_ACTIVE:-0}" -eq 1 ] && [ -f "${TIMER_LIVE_STATE_FILE:-}" ] || return 0
     label=${label//$'\n'/ }; label=${label//|/-}
     temporary=$(mktemp "${TIMER_LIVE_STATE_FILE}.progress.tmp.XXXXXX") || return 0
@@ -91,7 +369,7 @@ timer_archive_run() {
         "$@" < "$archive"
         return $?
     fi
-    python3 - "$archive" "$label" "$kind" "$state" "$@" <<'PY' || status=$?
+    python3 - "$archive" "$label" "$kind" "$state" "${TIMER_ETA_WORKSPACE:-}" "${TIMER_CURRENT_STEP:-}" "$@" <<'PY' || status=$?
 import os
 import signal
 import stat
@@ -101,7 +379,7 @@ import tempfile
 import time
 import uuid
 
-archive, label, kind, state, *command = sys.argv[1:]
+archive, label, kind, state, eta_workspace, eta_step, *command = sys.argv[1:]
 token = uuid.uuid4().hex
 label = label.replace('|', '-').replace('\n', ' ')
 started_wall = int(time.time())
@@ -123,6 +401,14 @@ for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
     signal.signal(signum, interrupted)
 
 def publish(done, total, result):
+    if result == 'success' and eta_workspace and eta_step:
+        try:
+            fd = os.open(os.path.join(eta_workspace, 'operations'),
+                         os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+            with os.fdopen(fd, 'w') as output:
+                output.write(f'{eta_step}|{label}|{int((time.monotonic() - started) * 1000)}\n')
+        except OSError:
+            pass
     if not state or not os.path.isfile(state):
         return
     temporary = None
@@ -206,6 +492,9 @@ timer_now() {
 
 timer_reset() {
     timer_live_stop "cleanup antes de reiniciar o timer" || true
+    timer_eta_cleanup
+    TIMER_ETA_BASE_STEPS=(); TIMER_ETA_BASE_OPERATIONS=()
+    TIMER_ETA_KEY=""; TIMER_ETA_FAILED=0; TIMER_ETA_COMPLETE=0
     timer_progress_reset
     TIMER_TOTAL_START=0
     TIMER_TOTAL_DURATION=0
@@ -263,7 +552,7 @@ timer_live_worker() {
     local state_file="$2"
     local rows="$3"
     local columns="$4"
-    local scroll_bottom=$((rows - 6))
+    local scroll_bottom=$((rows - 7))
     local step_id=""
     local label=""
     local step_start=0
@@ -274,6 +563,8 @@ timer_live_worker() {
     local cleanup_reason="encerramento normal"
     local token="" previous_token="" progress_label="" kind="" done=0 total=0 milliseconds=0 result="" started=0
     local progress_text="indeterminado" eta_text="não disponível" filled=0 empty=0 bar="" footer=""
+    local global_text="calculando..." previous_step="" phase_elapsed=0
+    TIMER_ETA_SMOOTHED=""
     timer_progress_reset
 
     timer_live_worker_cleanup() {
@@ -281,7 +572,7 @@ timer_live_worker() {
 
         if exec 9<>/dev/tty 2>/dev/null; then
             printf '\0337\033[r' >&9
-            for row in $((rows - 4)) $((rows - 3)) $((rows - 2)) $((rows - 1)) "$rows"; do
+            for row in $((rows - 5)) $((rows - 4)) $((rows - 3)) $((rows - 2)) $((rows - 1)) "$rows"; do
                 printf '\033[%s;1H\033[2K' "$row" >&9
             done
             printf '\0338\033[?25h' >&9
@@ -308,7 +599,10 @@ timer_live_worker() {
             (( step_start > 0 && step_start <= now )) || step_start=$now
             (( total_start > 0 && total_start <= now )) || total_start=$now
             step_elapsed=$((now - step_start))
+            phase_elapsed=$step_elapsed
             total_elapsed=$((now - total_start))
+            kind=C; result=running; milliseconds=0; progress_label=""
+            TIMER_PROGRESS_ETA=""
             progress_text="indeterminado"; eta_text="não disponível"
             if [ -f "${state_file}.progress" ] && IFS='|' read -r token progress_label kind done total milliseconds result started < "${state_file}.progress"; then
                 if [ "$token" != "$previous_token" ]; then timer_progress_reset; previous_token=$token; fi
@@ -329,13 +623,23 @@ timer_live_worker() {
                 fi
                 [ "$result" != failed ] || eta_text="operação falhou"
             fi
+            timer_eta_estimate "$step_id" "$phase_elapsed" "$progress_label" "$milliseconds" "$TIMER_PROGRESS_ETA" "$result"
+            global_text=$TIMER_ETA_STATUS
+            if [ "$step_id" != "$previous_step" ]; then TIMER_ETA_SMOOTHED=""; previous_step=$step_id; fi
+            if [ -n "$TIMER_ETA_REMAINING" ]; then
+                timer_eta_smooth "$TIMER_ETA_REMAINING"
+                global_text="~$(timer_format_duration "$TIMER_ETA_SMOOTHED") (aprox.)"
+            else
+                TIMER_ETA_SMOOTHED=""
+            fi
             label=${label:0:$((columns - 7))}
             footer="Restante da etapa: $eta_text"; footer=${footer:0:$columns}
             progress_text=${progress_text:0:$((columns - 11))}
-            printf '\0337\033[%s;1H\033[2KEtapa: %s\033[%s;1H\033[2KProgresso: %s\033[%s;1H\033[2KDecorrido etapa: %s\033[%s;1H\033[2KDecorrido total: %s\033[%s;1H\033[2K%s\0338' \
-                "$((rows - 4))" "$label" "$((rows - 3))" "$progress_text" \
-                "$((rows - 2))" "$(timer_format_duration "$step_elapsed")" \
-                "$((rows - 1))" "$(timer_format_duration "$total_elapsed")" "$rows" "$footer" >&9
+            global_text="Restante da instalação: $global_text"; global_text=${global_text:0:$columns}
+            printf '\0337\033[%s;1H\033[2KEtapa: %s\033[%s;1H\033[2KProgresso: %s\033[%s;1H\033[2KDecorrido etapa: %s\033[%s;1H\033[2KDecorrido total: %s\033[%s;1H\033[2K%s\033[%s;1H\033[2K%s\0338' \
+                "$((rows - 5))" "$label" "$((rows - 4))" "$progress_text" \
+                "$((rows - 3))" "$(timer_format_duration "$step_elapsed")" \
+                "$((rows - 2))" "$(timer_format_duration "$total_elapsed")" "$((rows - 1))" "$footer" "$rows" "$global_text" >&9
         fi
         sleep 1
     done
@@ -493,8 +797,13 @@ timer_run_step() {
     timer_step_start "$step_id" "$label"
     "$@" || status=$?
     timer_step_stop "$step_id" || true
+    if [ -n "${TIMER_ETA_WORKSPACE:-}" ]; then
+        printf '%s|%s\n' "$step_id" "$((${TIMER_STEP_DURATIONS[$step_id]:-0} * 1000))" >> "$TIMER_ETA_WORKSPACE/steps" 2>/dev/null || true
+    fi
     if [ "$status" -ne 0 ]; then
+        TIMER_ETA_FAILED=1
         timer_live_stop "cleanup após falha na etapa $label" || true
+        timer_eta_cleanup
     fi
     return "$status"
 }

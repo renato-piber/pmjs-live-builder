@@ -40,6 +40,7 @@ on_error() {
     local line_number=$1
 
     timer_live_stop "cleanup do tratador de erro" || true
+    timer_eta_cleanup
     storage_preserve_home_preflight_cleanup || true
     images_cleanup_offline_mount || true
     ui_error "Falha inesperada na linha $line_number."
@@ -54,6 +55,7 @@ on_signal() {
 
     [ "$signal" = "INT" ] && exit_code=130
     timer_live_stop "cleanup por sinal $signal" || true
+    timer_eta_cleanup
     storage_preserve_home_preflight_cleanup || true
     images_cleanup_offline_mount || true
     log_warning "PMJS Deploy interrompido por $signal."

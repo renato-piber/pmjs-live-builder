@@ -298,6 +298,7 @@ install_start() {
 
     install_summary
 
+    timer_eta_prepare || true
     timer_live_start || true
     if ! timer_run_step "validation" "Validação do plano" install_validate; then
         ui_pause
@@ -324,6 +325,7 @@ install_start() {
 
     timer_live_stop "confirmacao destrutiva exige terminal livre" || true
     if ! install_confirm_destructive; then
+        timer_eta_cleanup
         ui_pause
         return
     fi
@@ -368,6 +370,7 @@ install_start() {
 
     timer_total_stop
     timer_live_stop "encerramento normal das etapas" || true
+    timer_eta_finish || true
     log_info "install_start: etapas concluídas; preparando mensagem final."
     ui_clear
     ui_title "$VERSION"

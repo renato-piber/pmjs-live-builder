@@ -30,6 +30,7 @@ Exemplo:
 
 O NFS é montado ou reutilizado conforme config/image.conf. A versão no Ventoy
 é imutável e só aparece após cópia e validação completas.
+--ventoy-dir auto detecta/monta a mídia offline conforme a mesma configuração.
 EOF
 }
 
@@ -87,6 +88,7 @@ cleanup() {
             "${SYNC_IMAGE_NAME:-}" || { [[ ${exit_code} -ne 0 ]] || exit_code=1; }
         SYNC_STAGING=""
     fi
+    cleanup_ventoy_mount
     cleanup_nfs_mount
     if [[ "${SYNC_SUCCEEDED}" != true && ${exit_code} -ne 0 ]]; then
         ui_error "Sincronização interrompida (código ${exit_code})."
@@ -98,6 +100,10 @@ on_signal() {
     local signal=$1
     if [[ "${NFS_MOUNT_IN_PROGRESS}" == 1 ]]; then
         NFS_PENDING_SIGNAL=${signal}
+        return 0
+    fi
+    if [[ "${VENTOY_MOUNT_IN_PROGRESS}" == 1 ]]; then
+        VENTOY_PENDING_SIGNAL=${signal}
         return 0
     fi
     [[ "${signal}" == INT ]] && exit 130
@@ -144,7 +150,11 @@ main() {
     }
     nfs_active_mount_unchanged || { ui_error "O mount NFS mudou durante a validação"; return 1; }
 
-    validate_ventoy_sync_destination "${SYNC_VENTOY_DIR}" || return 1
+    if [[ "${SYNC_VENTOY_DIR}" == auto ]]; then
+        prepare_ventoy_automount || return 1
+    else
+        validate_ventoy_sync_destination "${SYNC_VENTOY_DIR}" || return 1
+    fi
     image_bundle_size_bytes "${SYNC_SOURCE_DIR}" image_bytes || return 1
     check_ventoy_free_space "${VENTOY_DESTINATION}" "${image_bytes}" \
         "${VENTOY_FREE_SPACE_MARGIN_MIB:-64}" || return 1

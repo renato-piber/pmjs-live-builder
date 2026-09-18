@@ -26,6 +26,9 @@ source "${PROJECT_DIR}/lib/homefs.sh"
 source "${PROJECT_DIR}/lib/rootfs.sh"
 # shellcheck source=lib/metadata.sh
 source "${PROJECT_DIR}/lib/metadata.sh"
+# Reutiliza a mesma cópia validada/atômica do sincronizador independente.
+# shellcheck source=lib/sync_ventoy.sh
+source "${PROJECT_DIR}/lib/sync_ventoy.sh"
 
 readonly START_TIME=${SECONDS}
 BUILD_SUCCEEDED=false
@@ -41,7 +44,15 @@ BUILD_WORKSPACE=""
 LOCAL_IMAGE_DIR=""
 BUILD_NFS_DIR=""
 BUILD_VENTOY_DIR=""
+BUILD_ALSO_VENTOY_DIR=""
+BUILD_VENTOY_COPY_IMAGE=""
+BUILD_VENTOY_COPY_STAGING=""
+BUILD_VENTOY_COPY_SUCCEEDED=false
+BUILD_VENTOY_COPY_SELECTED_INTERACTIVELY=false
+BUILD_DUAL_NFS_DIR=""
+BUILD_DUAL_NFS_RECORD=""
 BUILD_DESTINATION_KIND="local"
+IMAGE_VERSION_SOURCE="config/image.conf"
 LOCAL_TEMP_DIR_RESOLVED=""
 HOMEFS_STAGING_PARENT=""
 ROOTFS_GENERATE_SECONDS=0
@@ -55,6 +66,13 @@ cleanup() {
     trap - EXIT ERR INT TERM
     set +e
 
+    if [[ -n "${BUILD_VENTOY_COPY_STAGING:-}" ]]; then
+        cleanup_ventoy_sync_staging "${BUILD_VENTOY_COPY_STAGING}" \
+            "${VENTOY_DESTINATION:-}" "${BUILD_VENTOY_COPY_IMAGE:-}" || {
+                [[ ${exit_code} -ne 0 ]] || exit_code=1
+            }
+        BUILD_VENTOY_COPY_STAGING=""
+    fi
     if [[ -n "${GENERALIZATION_STAGING:-}" ]]; then
         cleanup_generalization_staging "${GENERALIZATION_STAGING}" \
             "${GENERALIZATION_BUILD_DIR}" || exit_code=1
@@ -72,6 +90,8 @@ cleanup() {
     if [[ -n "${BUILD_WORKSPACE:-}" ]]; then
         if [[ "${BUILD_DESTINATION_KIND:-}" == ventoy ]] && ! ventoy_mount_unchanged; then
             ui_warn "Staging Ventoy não removido: identidade do mount mudou ou não pôde ser confirmada."
+        elif [[ -n "${BUILD_ALSO_VENTOY_DIR}" ]] && ! dual_build_nfs_unchanged; then
+            ui_warn "Staging NFS não removido: identidade do mount do build duplo mudou ou não pôde ser confirmada."
         elif [[ -n "${NFS_ACTIVE_MOUNTPOINT}" ]] && ! nfs_active_mount_unchanged; then
             ui_warn "Staging NFS não removido: identidade do mount mudou ou não pôde ser confirmada."
         else
@@ -84,9 +104,14 @@ cleanup() {
     if [[ -n "${SOURCE_DETECT_DIR:-}" ]]; then
         cleanup_detected_capture_source || exit_code=1
     fi
+    cleanup_ventoy_mount
     cleanup_nfs_mount
 
-    if [[ "${BUILD_SUCCEEDED}" != true && ${exit_code} -ne 0 ]]; then
+    if [[ ${exit_code} -ne 0 && "${BUILD_SUCCEEDED}" == true &&
+          -n "${BUILD_ALSO_VENTOY_DIR}" && "${BUILD_VENTOY_COPY_SUCCEEDED}" != true ]]; then
+        ui_error "Imagem válida preservada no NFS: ${LOCAL_IMAGE_DIR}"
+        ui_error "Cópia para o Ventoy não concluída (código ${exit_code}). Repita somente a sincronização, sem recapturar esta versão."
+    elif [[ "${BUILD_SUCCEEDED}" != true && ${exit_code} -ne 0 ]]; then
         ui_error "Build interrompido (código ${exit_code}). Consulte: ${LOG_FILE:-log não inicializado}"
     fi
 
@@ -108,6 +133,10 @@ on_signal() {
         NFS_PENDING_SIGNAL=${signal}
         return 0
     fi
+    if [[ "${VENTOY_MOUNT_IN_PROGRESS}" == 1 ]]; then
+        VENTOY_PENDING_SIGNAL=${signal}
+        return 0
+    fi
     log_write WARN "Sinal ${signal} recebido; interrompendo o build."
     [[ "${signal}" == INT ]] && exit 130
     exit 143
@@ -122,6 +151,21 @@ usage() {
     cat <<'EOF'
 Uso:
   sudo ./build-image.sh [--nfs-dir DIRETÓRIO | --ventoy-dir DIRETÓRIO]
+                       [--also-ventoy-dir DIRETÓRIO]
+
+Em terminal interativo, pergunta o sufixo/versão da nova imagem antes de montar
+destinos ou capturar arquivos. Aceita '0.3.0' ou 'pmjs-linux-0.3.0' (com o prefixo
+IMAGE_NAME configurado); Enter mantém o padrão de config/image.conf.
+Sem terminal interativo, mantém nome/versão da configuração, sem ler stdin.
+Em terminal e com destino NFS, também oferece a cópia para o Ventoy [S/n].
+VENTOY_AUTOMOUNT_ENABLED=1 detecta/monta a mídia configurada automaticamente;
+com 0/ausente pede o caminho manual. O lançador da Live usa esse fluxo.
+--also-ventoy-dir auto e --ventoy-dir auto habilitam descoberta explicitamente.
+
+Com --also-ventoy-dir, exige build NFS (automático ou --nfs-dir) e depois copia
+o bundle final para o pmjs-images informado. NFS e Ventoy são validados e
+publicados separadamente; se a cópia falhar, o NFS válido permanece e o comando
+retorna erro. Não pode ser combinado com --ventoy-dir.
 
 Sem uma opção de destino, NFS_ENABLED=1 monta/reutiliza o NFS de config/image.conf.
 Com NFS_ENABLED=0 (ou ausente), usa NFS_IMAGES_DIR legado ou OUTPUT_DIR local.
@@ -135,6 +179,87 @@ sob o diretório pmjs-images de uma mídia já montada. A identidade do mount é
 validada durante o build e o NFS configurado não é acessado. Generalização e
 homefs continuam usando apenas LOCAL_TEMP_DIR em filesystem Linux local.
 EOF
+}
+
+select_build_image_version() {
+    local entered_version
+    IMAGE_VERSION_SOURCE="config/image.conf"
+    # Preserve execuções automatizadas e stdin redirecionado: nunca consumir
+    # dados de um pipe, nem abrir /dev/tty para forçar uma pergunta.
+    [[ -t 0 ]] || return 0
+
+    ui_info "Nome da nova imagem: ${IMAGE_NAME}-<versão/sufixo>"
+    while true; do
+        if ! read -r -p "Versão/sufixo ou nome completo [${IMAGE_NAME}-${IMAGE_VERSION}]: " entered_version; then
+            ui_error "Seleção da imagem cancelada; build não iniciado."
+            return 1
+        fi
+        [[ -n "${entered_version}" ]] || break
+        # O prefixo continua sendo IMAGE_NAME; não confundir a versão do
+        # artefato com a versão do programa em VERSION.
+        entered_version=${entered_version#"${IMAGE_NAME}-"}
+        if [[ ! "${entered_version}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            ui_error "Versão/sufixo inválido: use letras, números, ponto, hífen ou underscore; comece com letra ou número."
+            continue
+        fi
+        IMAGE_VERSION=${entered_version}
+        IMAGE_VERSION_SOURCE="seleção interativa"
+        break
+    done
+    ui_info "Imagem selecionada: ${IMAGE_NAME}-${IMAGE_VERSION}"
+}
+
+select_interactive_ventoy_copy() {
+    local answer requested_dir
+    [[ -t 0 ]] || return 0
+    # Opções explícitas vencem a pergunta. Build local/direto no Ventoy não
+    # deve começar a acessar o servidor só por estar em um terminal.
+    [[ -z "${BUILD_VENTOY_DIR}" && -z "${BUILD_ALSO_VENTOY_DIR}" ]] || return 0
+    [[ -n "${BUILD_NFS_DIR}" || "${NFS_ENABLED:-0}" == 1 ||
+       ( "${NFS_ENABLED:-0}" == 0 && -n "${NFS_IMAGES_DIR:-}" ) ]] || return 0
+
+    while true; do
+        if ! read -r -p "Copiar também para o Ventoy após publicar no NFS? [S/n]: " answer; then
+            ui_error "Seleção dos destinos cancelada; build não iniciado."
+            return 1
+        fi
+        case "${answer}" in
+            ''|s|S|sim|Sim|SIM|y|Y|yes|Yes|YES) break ;;
+            n|N|nao|não|Nao|Não|NAO|NÃO|no|No|NO)
+                ui_info "Destino selecionado: somente NFS"
+                return 0 ;;
+            *) ui_error "Responda S para NFS + Ventoy ou N para somente NFS." ;;
+        esac
+    done
+    case "${VENTOY_AUTOMOUNT_ENABLED:-0}" in
+        1)
+            BUILD_ALSO_VENTOY_DIR=auto
+            ui_info "Destinos selecionados: NFS + Ventoy automático (config/image.conf)"
+            return 0 ;;
+        0) : ;;
+        *) ui_error "VENTOY_AUTOMOUNT_ENABLED deve ser 0 ou 1"; return 1 ;;
+    esac
+    check_ventoy_dependencies || return 1
+    ui_info "Informe a pasta pmjs-images da mídia Ventoy já montada; nenhum caminho será presumido."
+    while true; do
+        if ! read -r -p "Diretório pmjs-images do Ventoy: " requested_dir; then
+            ui_error "Seleção dos destinos cancelada; build não iniciado."
+            return 1
+        fi
+        if [[ -z "${requested_dir}" ]]; then
+            ui_error "O caminho do Ventoy é obrigatório; Ctrl+D cancela o build."
+            continue
+        fi
+        # Somente leitura neste estágio; nada de mkdir ou mounts reais antes
+        # de o operador concluir as escolhas. O preflight reconfirma depois.
+        if ! validate_ventoy_sync_destination "${requested_dir}"; then
+            continue
+        fi
+        BUILD_ALSO_VENTOY_DIR=${VENTOY_DESTINATION}
+        BUILD_VENTOY_COPY_SELECTED_INTERACTIVELY=true
+        ui_info "Destinos selecionados: NFS + Ventoy (${BUILD_ALSO_VENTOY_DIR})"
+        return 0
+    done
 }
 
 parse_build_arguments() {
@@ -160,6 +285,16 @@ parse_build_arguments() {
                 BUILD_VENTOY_DIR=$2
                 shift 2
                 ;;
+            --also-ventoy-dir)
+                (( $# >= 2 )) || { ui_error "Valor ausente para --also-ventoy-dir"; return 1; }
+                [[ -n "$2" ]] || { ui_error "Valor vazio para --also-ventoy-dir"; return 1; }
+                [[ -z "${BUILD_ALSO_VENTOY_DIR}" ]] || {
+                    ui_error "--also-ventoy-dir foi informado mais de uma vez"
+                    return 1
+                }
+                BUILD_ALSO_VENTOY_DIR=$2
+                shift 2
+                ;;
             --help|-h)
                 usage
                 return 2
@@ -174,6 +309,110 @@ parse_build_arguments() {
         ui_error "--nfs-dir e --ventoy-dir são mutuamente exclusivos"
         return 1
     }
+    [[ -z "${BUILD_ALSO_VENTOY_DIR}" || -z "${BUILD_VENTOY_DIR}" ]] || {
+        ui_error "--also-ventoy-dir não pode ser combinado com --ventoy-dir; use build NFS como destino principal"
+        return 1
+    }
+}
+
+read_dual_build_nfs_identity() {
+    local record mount_id source filesystem target extra
+    [[ -n "${BUILD_DUAL_NFS_DIR}" &&
+       "$(realpath -e -- "${BUILD_DUAL_NFS_DIR}")" == "${BUILD_DUAL_NFS_DIR}" ]] || return 1
+    record="$(findmnt --noheadings --raw --target "${BUILD_DUAL_NFS_DIR}" \
+        --output ID,SOURCE,FSTYPE,TARGET)" || return 1
+    [[ -n "${record}" && "${record}" != *$'\n'* ]] || return 1
+    read -r mount_id source filesystem target extra <<< "${record}"
+    [[ "${mount_id}" =~ ^[0-9]+$ && -n "${source}" && -z "${extra}" &&
+       ( "${filesystem}" == nfs || "${filesystem}" == nfs4 ) &&
+       "${target}" == /* &&
+       ( "${BUILD_DUAL_NFS_DIR}" == "${target}" ||
+         "${BUILD_DUAL_NFS_DIR}" == "${target}/"* ) ]] || return 1
+    printf '%s\n' "${record}"
+}
+
+dual_build_nfs_unchanged() {
+    local current_record
+    [[ -n "${BUILD_DUAL_NFS_RECORD}" ]] || return 1
+    current_record="$(read_dual_build_nfs_identity)" || return 1
+    [[ "${current_record}" == "${BUILD_DUAL_NFS_RECORD}" ]]
+}
+
+prepare_build_ventoy_copy() {
+    [[ -n "${BUILD_ALSO_VENTOY_DIR}" ]] || return 0
+    [[ -n "${BUILD_NFS_DIR}" && -z "${BUILD_VENTOY_DIR}" ]] || {
+        ui_error "--also-ventoy-dir exige NFS como destino principal; build não iniciado"
+        return 1
+    }
+    BUILD_DUAL_NFS_DIR="$(realpath -e -- "${BUILD_NFS_DIR}")" || return 1
+    BUILD_DUAL_NFS_RECORD="$(read_dual_build_nfs_identity)" || {
+        ui_error "findmnt não confirmou o destino NFS do build duplo; build não iniciado"
+        return 1
+    }
+    BUILD_VENTOY_COPY_IMAGE="${IMAGE_NAME}-${IMAGE_VERSION}"
+    validate_sync_image_name "${BUILD_VENTOY_COPY_IMAGE}" "${IMAGE_NAME}" || return 1
+    check_ventoy_dependencies || return 1
+    if [[ "${BUILD_ALSO_VENTOY_DIR}" == auto ]]; then
+        prepare_ventoy_automount || return 1
+    elif [[ "${BUILD_VENTOY_COPY_SELECTED_INTERACTIVELY}" == true ]]; then
+        # Manter a identidade confirmada durante a pergunta, sem substituí-la
+        # por outra mídia que apareceu no mesmo caminho durante o mount NFS.
+        [[ "${BUILD_ALSO_VENTOY_DIR}" == "${VENTOY_DESTINATION}" &&
+           -d "${VENTOY_DESTINATION}" && -w "${VENTOY_DESTINATION}" ]] &&
+            ventoy_mount_unchanged || {
+                ui_error "O mount do Ventoy mudou após a seleção interativa; build não iniciado"
+                return 1
+            }
+    else
+        validate_ventoy_sync_destination "${BUILD_ALSO_VENTOY_DIR}" || return 1
+    fi
+    [[ "${VENTOY_MOUNT_ID}" != "${BUILD_DUAL_NFS_RECORD%% *}" &&
+       "${VENTOY_MOUNT_FSTYPE}" != nfs && "${VENTOY_MOUNT_FSTYPE}" != nfs4 ]] || {
+        ui_error "O destino offline deve estar em uma mídia separada do NFS"
+        return 1
+    }
+    [[ ! -e "${VENTOY_DESTINATION}/${BUILD_VENTOY_COPY_IMAGE}" &&
+       ! -L "${VENTOY_DESTINATION}/${BUILD_VENTOY_COPY_IMAGE}" ]] || {
+        ui_error "A versão já existe no Ventoy e não será substituída; build não iniciado"
+        return 1
+    }
+    # O tamanho real só é conhecido depois do build; conferir a margem agora
+    # e imagem + margem novamente antes de criar o staging da cópia.
+    check_ventoy_free_space "${VENTOY_DESTINATION}" 0 \
+        "${VENTOY_FREE_SPACE_MARGIN_MIB:-64}" || return 1
+    BUILD_ALSO_VENTOY_DIR=${VENTOY_DESTINATION}
+}
+
+copy_built_image_to_ventoy() {
+    local image_bytes resolved_source
+    [[ -n "${BUILD_ALSO_VENTOY_DIR}" ]] || return 0
+    resolved_source="$(realpath -e -- "${LOCAL_IMAGE_DIR}")" || return 1
+    [[ "${BUILD_SUCCEEDED}" == true && "${BUILD_DESTINATION_KIND}" == nfs &&
+       "${resolved_source}" == "${BUILD_DUAL_NFS_DIR}/${BUILD_VENTOY_COPY_IMAGE}" &&
+       "${LOCAL_IMAGE_DIR}" == "${resolved_source}" && ! -L "${LOCAL_IMAGE_DIR}" ]] || {
+        ui_error "Cópia recusada: é necessário um bundle final publicado pelo build NFS"
+        return 1
+    }
+    dual_build_nfs_unchanged || { ui_error "O mount NFS mudou antes da cópia"; return 1; }
+    ui_info "Validando bundle final no NFS antes da cópia offline..."
+    validate_image_directory "${LOCAL_IMAGE_DIR}" || return 1
+    dual_build_nfs_unchanged || { ui_error "O mount NFS mudou durante a validação"; return 1; }
+    image_bundle_size_bytes "${LOCAL_IMAGE_DIR}" image_bytes || return 1
+    check_ventoy_free_space "${VENTOY_DESTINATION}" "${image_bytes}" \
+        "${VENTOY_FREE_SPACE_MARGIN_MIB:-64}" || return 1
+    prepare_ventoy_sync_staging "${VENTOY_DESTINATION}" "${BUILD_VENTOY_COPY_IMAGE}" \
+        BUILD_VENTOY_COPY_STAGING || return 1
+    copy_image_to_ventoy_staging "${LOCAL_IMAGE_DIR}" "${BUILD_VENTOY_COPY_STAGING}" || return 1
+    dual_build_nfs_unchanged || { ui_error "O mount NFS mudou durante a cópia"; return 1; }
+    validate_copied_ventoy_bundle "${BUILD_VENTOY_COPY_STAGING}" || return 1
+    dual_build_nfs_unchanged || { ui_error "O mount NFS mudou antes do commit offline"; return 1; }
+    commit_ventoy_sync "${BUILD_VENTOY_COPY_STAGING}" "${VENTOY_DESTINATION}" \
+        "${BUILD_VENTOY_COPY_IMAGE}" || return 1
+    BUILD_VENTOY_COPY_STAGING=""
+    BUILD_VENTOY_COPY_SUCCEEDED=true
+    ui_success "Imagem copiada para o Ventoy"
+    printf 'NFS: %s\nVentoy: %s/%s\nSHA256: OK nos dois destinos\n' \
+        "${LOCAL_IMAGE_DIR}" "${VENTOY_DESTINATION}" "${BUILD_VENTOY_COPY_IMAGE}"
 }
 
 check_active_build_destination() {
@@ -182,20 +421,27 @@ check_active_build_destination() {
         ui_error "O mount do Ventoy mudou ${phase}; build interrompido"
         return 1
     fi
+    if [[ -n "${BUILD_ALSO_VENTOY_DIR}" ]] && ! dual_build_nfs_unchanged; then
+        ui_error "O mount NFS mudou ${phase}; build duplo interrompido"
+        return 1
+    fi
 }
 
 select_build_destination() {
     if [[ -n "${BUILD_VENTOY_DIR}" ]]; then
         check_ventoy_dependencies || { ui_error "Build não iniciado."; return 1; }
-        validate_ventoy_destination "${BUILD_VENTOY_DIR}" || {
+        if [[ "${BUILD_VENTOY_DIR}" == auto ]]; then
+            prepare_ventoy_automount || { ui_error "Build não iniciado."; return 1; }
+        elif ! validate_ventoy_destination "${BUILD_VENTOY_DIR}"; then
             ui_error "Build não iniciado."
             return 1
-        }
+        fi
         BUILD_VENTOY_DIR=${VENTOY_DESTINATION}
     elif ! select_build_nfs_destination; then
         ui_error "Build não iniciado."
         return 1
     fi
+    prepare_build_ventoy_copy || { ui_error "Build não iniciado."; return 1; }
 }
 
 build_rootfs_artifact() {
@@ -305,6 +551,9 @@ main() {
     # shellcheck source=config/image.conf
     source "${config_file}"
     validate_config
+    select_build_image_version || return 1
+    validate_config
+    select_interactive_ventoy_copy || return 1
     check_compression_dependency "${IMAGE_COMPRESSION}"
     load_builder_version "${version_file}" builder_version
     extension="$(archive_extension "${IMAGE_COMPRESSION}")"
@@ -324,7 +573,7 @@ main() {
     init_log "${LOG_DIR}"
     log_write INFO "Iniciando build ${IMAGE_NAME}-${IMAGE_VERSION}"
     log_write INFO "Configuração carregada de ${config_file}"
-    log_write INFO "Versões independentes: builder=${builder_version} (VERSION), imagem=${IMAGE_VERSION} (config/image.conf)"
+    log_write INFO "Versões independentes: builder=${builder_version} (VERSION), imagem=${IMAGE_VERSION} (${IMAGE_VERSION_SOURCE})"
 
     select_build_destination || return 1
 
@@ -431,10 +680,11 @@ main() {
     finalize_build_workspace "${BUILD_WORKSPACE}" "${LOCAL_IMAGE_DIR}" || return 1
     check_active_build_destination "durante a publicação final" || return 1
     BUILD_WORKSPACE=""
-    elapsed="$(( SECONDS - START_TIME ))"
     BUILD_SUCCEEDED=true
 
     log_write SUCCESS "Imagem ${BUILD_DESTINATION_KIND} publicada após validação completa: ${LOCAL_IMAGE_DIR}"
+    copy_built_image_to_ventoy || return 1
+    elapsed="$(( SECONDS - START_TIME ))"
     log_write INFO "Tamanho rootfs: ${rootfs_size}; tamanho homefs: ${homefs_size}"
     log_write INFO "Tempos: preparação=${preparation_seconds}s; rootfs_geração=${ROOTFS_GENERATE_SECONDS}s; rootfs_validação=${ROOTFS_VALIDATE_SECONDS}s; homefs_geração=${HOMEFS_GENERATE_SECONDS}s; homefs_validação=${HOMEFS_VALIDATE_SECONDS}s; metadata=${metadata_seconds}s; total=${elapsed}s"
     ui_success "Build concluído"
