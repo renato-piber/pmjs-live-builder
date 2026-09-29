@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# shellcheck source=perf.sh
+source "${BASH_SOURCE[0]%/*}/perf.sh"
+
 archive_extension() {
     case "$1" in
         gzip) printf '%s\n' 'tar.gz' ;;

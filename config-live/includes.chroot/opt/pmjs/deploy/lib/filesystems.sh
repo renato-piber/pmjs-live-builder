@@ -19,6 +19,14 @@ filesystems_log_command() {
 }
 
 filesystems_validate_partitions() {
+    if declare -F log_perf_run >/dev/null; then
+        log_perf_run 'filesystem partition guards' filesystems_validate_partitions_impl "$@"
+    else
+        filesystems_validate_partitions_impl "$@"
+    fi
+}
+
+filesystems_validate_partitions_impl() {
     local disk="$1"
 
     if [ -z "$disk" ]; then
@@ -96,6 +104,14 @@ filesystems_validate_partitions() {
 }
 
 filesystems_verify() {
+    if declare -F log_perf_run >/dev/null; then
+        log_perf_run 'filesystem verification (blkid)' filesystems_verify_impl "$@"
+    else
+        filesystems_verify_impl "$@"
+    fi
+}
+
+filesystems_verify_impl() {
     local disk="$1"
     local expected_efi="$2"
     local expected_swap="$3"

@@ -68,31 +68,50 @@ prepare_ventoy_sync_staging() {
 
 copy_image_to_ventoy_staging() {
     local source_dir=$1 staging_dir=$2
+    local perf_started status image_bytes=0
+    image_bundle_size_bytes "${source_dir}" image_bytes || return 1
     ui_info "Copiando imagem para o staging do Ventoy..."
-    rsync --whole-file --human-readable --info=progress2 -- \
+    perf_operation_start ventoy.copy.rsync perf_started \
+        "source=$(printf '%q' "${source_dir}") staging=$(printf '%q' "${staging_dir}") size_bytes=${image_bytes} access=source_full_read+ventoy_write"
+    if rsync --whole-file --human-readable --info=progress2 -- \
         "${source_dir}/rootfs.tar.zst" "${source_dir}/homefs.tar.zst" \
         "${source_dir}/SHA256SUMS" "${source_dir}/manifest.json" \
-        "${staging_dir}/"
+        "${staging_dir}/"; then status=0; else status=$?; fi
+    perf_operation_end ventoy.copy.rsync "${perf_started}" "${status}" \
+        "${image_bytes}" bundle_bytes \
+        "source=$(printf '%q' "${source_dir}") staging=$(printf '%q' "${staging_dir}") access=source_full_read+ventoy_write"
+    (( status == 0 )) || return "${status}"
 }
 
 validate_copied_ventoy_bundle() {
     local staging_dir=$1
+    local perf_started status
     ventoy_mount_unchanged || {
         ui_error "O mount do Ventoy mudou durante a cópia"
         return 1
     }
     ui_info "Recalculando SHA256 no Ventoy..."
-    validate_image_directory "${staging_dir}" || {
+    perf_operation_start ventoy.bundle.validation perf_started \
+        "directory=$(printf '%q' "${staging_dir}")"
+    if validate_image_directory "${staging_dir}"; then status=0; else status=$?; fi
+    perf_operation_end ventoy.bundle.validation "${perf_started}" "${status}" \
+        "" none "directory=$(printf '%q' "${staging_dir}")"
+    (( status == 0 )) || {
         ui_error "A cópia no Ventoy falhou na validação completa"
         return 1
     }
     ui_success "SHA256 validado no Ventoy"
-    sync --file-system "${staging_dir}/manifest.json"
+    perf_operation_start ventoy.sync.staging perf_started \
+        "path=$(printf '%q' "${staging_dir}/manifest.json") access=filesystem_flush"
+    if sync --file-system "${staging_dir}/manifest.json"; then status=0; else status=$?; fi
+    perf_operation_end ventoy.sync.staging "${perf_started}" "${status}" \
+        "" none "path=$(printf '%q' "${staging_dir}/manifest.json") access=filesystem_flush"
+    (( status == 0 )) || return "${status}"
 }
 
 commit_ventoy_sync() {
     local staging_dir=$1 destination=$2 image_name=$3
-    local resolved_staging staging_name final_dir
+    local resolved_staging staging_name final_dir perf_started status
     resolved_staging="$(realpath -e -- "${staging_dir}")" || return 1
     staging_name="$(basename -- "${resolved_staging}")"
     final_dir="${destination}/${image_name}"
@@ -108,12 +127,22 @@ commit_ventoy_sync() {
         ui_error "Staging Ventoy inseguro ou versão já existente: ${staging_dir}"
         return 1
     }
-    mv -T --no-clobber -- "${resolved_staging}" "${final_dir}"
+    perf_operation_start ventoy.commit.rename perf_started \
+        "staging=$(printf '%q' "${resolved_staging}") final=$(printf '%q' "${final_dir}") access=filesystem_metadata"
+    if mv -T --no-clobber -- "${resolved_staging}" "${final_dir}"; then status=0; else status=$?; fi
+    perf_operation_end ventoy.commit.rename "${perf_started}" "${status}" \
+        "" none "final=$(printf '%q' "${final_dir}") access=filesystem_metadata"
+    (( status == 0 )) || return "${status}"
     [[ ! -e "${resolved_staging}" && -d "${final_dir}" ]] || {
         ui_error "A versão surgiu durante a publicação e não foi substituída: ${final_dir}"
         return 1
     }
-    sync --file-system "${final_dir}/manifest.json"
+    perf_operation_start ventoy.sync.final perf_started \
+        "path=$(printf '%q' "${final_dir}/manifest.json") access=filesystem_flush"
+    if sync --file-system "${final_dir}/manifest.json"; then status=0; else status=$?; fi
+    perf_operation_end ventoy.sync.final "${perf_started}" "${status}" \
+        "" none "path=$(printf '%q' "${final_dir}/manifest.json") access=filesystem_flush"
+    (( status == 0 )) || return "${status}"
 }
 
 cleanup_ventoy_sync_staging() {

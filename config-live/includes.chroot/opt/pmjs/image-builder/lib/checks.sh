@@ -234,6 +234,7 @@ cleanup_build_workspace() {
 
 finalize_build_workspace() {
     local workspace=$1 final_dir=$2
+    local perf_started status filesystem
 
     [[ -d "${workspace}" && ! -L "${workspace}" &&
        "$(dirname -- "${workspace}")" == "$(dirname -- "${final_dir}")" &&
@@ -242,13 +243,29 @@ finalize_build_workspace() {
         ui_error "Staging local inseguro ou versão já existente: ${workspace}"
         return 1
     }
-    sync --file-system "${workspace}/manifest.json"
-    mv -T --no-clobber -- "${workspace}" "${final_dir}"
+    filesystem="$(stat --file-system --format='%T' -- "${workspace}")"
+    perf_operation_start publication.sync.pre_rename perf_started \
+        "path=$(printf '%q' "${workspace}/manifest.json") filesystem=$(printf '%q' "${filesystem}") access=filesystem_flush"
+    if sync --file-system "${workspace}/manifest.json"; then status=0; else status=$?; fi
+    perf_operation_end publication.sync.pre_rename "${perf_started}" "${status}" \
+        "" none "path=$(printf '%q' "${workspace}/manifest.json") filesystem=$(printf '%q' "${filesystem}") access=filesystem_flush"
+    (( status == 0 )) || return "${status}"
+    perf_operation_start publication.rename perf_started \
+        "staging=$(printf '%q' "${workspace}") final=$(printf '%q' "${final_dir}") access=filesystem_metadata"
+    if mv -T --no-clobber -- "${workspace}" "${final_dir}"; then status=0; else status=$?; fi
+    perf_operation_end publication.rename "${perf_started}" "${status}" \
+        "" none "final=$(printf '%q' "${final_dir}") access=filesystem_metadata"
+    (( status == 0 )) || return "${status}"
     [[ ! -e "${workspace}" && -d "${final_dir}" ]] || {
         ui_error "A versão local surgiu durante o build e não foi substituída: ${final_dir}"
         return 1
     }
-    sync --file-system "${final_dir}/manifest.json"
+    perf_operation_start publication.sync.post_rename perf_started \
+        "path=$(printf '%q' "${final_dir}/manifest.json") filesystem=$(printf '%q' "${filesystem}") access=filesystem_flush"
+    if sync --file-system "${final_dir}/manifest.json"; then status=0; else status=$?; fi
+    perf_operation_end publication.sync.post_rename "${perf_started}" "${status}" \
+        "" none "path=$(printf '%q' "${final_dir}/manifest.json") filesystem=$(printf '%q' "${filesystem}") access=filesystem_flush"
+    (( status == 0 )) || return "${status}"
 }
 
 check_free_space() {

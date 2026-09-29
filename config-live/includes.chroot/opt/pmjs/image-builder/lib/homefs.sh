@@ -281,9 +281,22 @@ generate_homefs() {
     local staging_dir=$1 home_user=$2 archive_file=$3
     local compression=${4:-gzip} zstd_level=${5:-3}
     local -a compression_options
+    local perf_started perf_context perf_size status
     archive_tar_create_options "${compression}" "${zstd_level}" compression_options
-    tar --create "${compression_options[@]}" --file "${archive_file}" --numeric-owner --acls --xattrs \
-        --directory="${staging_dir}" "${home_user}"
+    perf_context="$(perf_archive_context "${archive_file}")"
+    perf_operation_start homefs.create perf_started \
+        "source=$(printf '%q' "${staging_dir}") ${perf_context} access=source_read+archive_write"
+    if tar --create "${compression_options[@]}" --file "${archive_file}" --numeric-owner --acls --xattrs \
+        --directory="${staging_dir}" "${home_user}"; then
+        status=0
+    else
+        status=$?
+    fi
+    perf_size="$(stat -c '%s' -- "${archive_file}" 2>/dev/null || true)"
+    perf_context="$(perf_archive_context "${archive_file}")"
+    perf_operation_end homefs.create "${perf_started}" "${status}" \
+        "${perf_size}" compressed_output "${perf_context} access=source_read+archive_write"
+    (( status == 0 )) || return "${status}"
 }
 
 validate_homefs_archive() {
@@ -292,17 +305,40 @@ validate_homefs_archive() {
     local listing entry normalized first_useful="" directory
     local compression=${IMAGE_COMPRESSION:-gzip}
     local -a read_options
+    local perf_started perf_context perf_size status
 
     [[ -s "${archive_file}" ]] || { ui_error "homefs vazio: ${archive_file}"; return 1; }
-    validate_archive_compression "${archive_file}" "${compression}" || {
+    perf_size="$(stat -c '%s' -- "${archive_file}" 2>/dev/null || true)"
+    perf_context="$(perf_archive_context "${archive_file}")"
+    perf_operation_start "homefs.integrity.${compression}" perf_started \
+        "${perf_context} access=full_read+full_decompression"
+    if validate_archive_compression "${archive_file}" "${compression}"; then
+        status=0
+    else
+        status=$?
+    fi
+    perf_operation_end "homefs.integrity.${compression}" "${perf_started}" "${status}" \
+        "${perf_size}" compressed_input "${perf_context} access=full_read+full_decompression"
+    (( status == 0 )) || {
         ui_error "Falha ${compression} no homefs: ${archive_file}"
         return 1
     }
     archive_tar_read_options "${compression}" read_options
-    listing="$(tar --list "${read_options[@]}" --file "${archive_file}")" || {
+    perf_operation_start homefs.tar_listing.members perf_started \
+        "${perf_context} access=full_read+full_decompression"
+    if listing="$(tar --list "${read_options[@]}" --file "${archive_file}")"; then
+        status=0
+    else
+        status=$?
+    fi
+    perf_operation_end homefs.tar_listing.members "${perf_started}" "${status}" \
+        "${perf_size}" compressed_input "${perf_context} access=full_read+full_decompression"
+    (( status == 0 )) || {
         ui_error "Falha ao listar homefs: ${archive_file}"
         return 1
     }
+    perf_operation_start homefs.members.semantic_validation perf_started \
+        "archive_listing=in_memory access=no_archive_read"
     while IFS= read -r entry; do
         normalized=${entry#./}
         normalized=${normalized%/}
@@ -311,32 +347,47 @@ validate_homefs_archive() {
         [[ "${entry}" != /* && "${normalized}" != .. && "${normalized}" != ../* &&
            "${normalized}" != */../* && "${normalized}" != */.. ]] || {
             ui_error "Caminho inseguro no homefs: ${entry}"
+            perf_operation_end homefs.members.semantic_validation "${perf_started}" 1 \
+                "" none "archive_listing=in_memory access=no_archive_read"
             return 1
         }
         [[ "${normalized}" == "${home_user}" || "${normalized}" == "${home_user}/"* ]] || {
             ui_error "Raiz inválida no homefs: ${entry}"
+            perf_operation_end homefs.members.semantic_validation "${perf_started}" 1 \
+                "" none "archive_listing=in_memory access=no_archive_read"
             return 1
         }
         [[ "${normalized}" != home && "${normalized}" != home/* ]] || {
             ui_error "Prefixo home/ proibido no homefs: ${entry}"
+            perf_operation_end homefs.members.semantic_validation "${perf_started}" 1 \
+                "" none "archive_listing=in_memory access=no_archive_read"
             return 1
         }
         homefs_path_is_allowed "${normalized}" "${home_user}" "$@" || {
             ui_error "Entrada fora da whitelist no homefs: ${entry}"
+            perf_operation_end homefs.members.semantic_validation "${perf_started}" 1 \
+                "" none "archive_listing=in_memory access=no_archive_read"
             return 1
         }
     done <<< "${listing}"
     [[ "${first_useful}" == "${home_user}" ]] || {
         ui_error "Primeira raiz útil do homefs não é ${home_user}/"
+        perf_operation_end homefs.members.semantic_validation "${perf_started}" 1 \
+            "" none "archive_listing=in_memory access=no_archive_read"
         return 1
     }
     for directory in "$@"; do
         grep -Fqx -- "${home_user}/${directory}/" <<< "${listing}" || {
             ui_error "Diretório padrão ausente do homefs: ${directory}"
+            perf_operation_end homefs.members.semantic_validation "${perf_started}" 1 \
+                "" none "archive_listing=in_memory access=no_archive_read"
             return 1
         }
     done
-    tar --list "${read_options[@]}" --file "${archive_file}" >/dev/null
+    perf_operation_end homefs.members.semantic_validation "${perf_started}" 0 \
+        "" none "archive_listing=in_memory access=no_archive_read"
+    # A primeira listagem ja chegou a EOF, validou a estrutura tar e alimentou
+    # todas as verificacoes de raiz, paths e whitelist.
 }
 
 cleanup_homefs_staging() {

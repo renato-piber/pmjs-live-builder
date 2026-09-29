@@ -128,6 +128,14 @@ mounts_validate_target_mount() {
 }
 
 mounts_validate() {
+    if declare -F log_perf_run >/dev/null; then
+        log_perf_run 'mount preflight guards' mounts_validate_impl "$@"
+    else
+        mounts_validate_impl "$@"
+    fi
+}
+
+mounts_validate_impl() {
     local target_mount="${INSTALL_TARGET_MOUNT:-}"
     local efi_fs=""
     local root_fs=""
@@ -397,6 +405,14 @@ mounts_mount_partitions() {
 }
 
 mounts_verify() {
+    if declare -F log_perf_run >/dev/null; then
+        log_perf_run 'mount verification' mounts_verify_impl "$@"
+    else
+        mounts_verify_impl "$@"
+    fi
+}
+
+mounts_verify_impl() {
     local target_root="${INSTALL_TARGET_ROOT:-$INSTALL_TARGET_MOUNT}"
     local target_home="${INSTALL_TARGET_HOME:-$target_root/home}"
     local target_efi="${INSTALL_TARGET_EFI:-$target_root/boot/efi}"

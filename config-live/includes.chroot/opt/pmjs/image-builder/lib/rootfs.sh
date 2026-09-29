@@ -62,14 +62,26 @@ generate_rootfs() {
     local compression=${5:-gzip}
     local zstd_level=${6:-3}
     local -a tar_command
-    local quoted_command
+    local quoted_command perf_started perf_context perf_size status
 
     build_tar_command "${source_root}" "${build_dir}" "${archive_file}" \
         "${generalization_staging}" "${compression}" "${zstd_level}" tar_command
     printf -v quoted_command '%q ' "${tar_command[@]}"
     log_write INFO "Comando tar efetivo: ${quoted_command% }"
     log_write INFO "Executando GNU tar para capturar ${source_root}"
-    "${tar_command[@]}" 2> >(while IFS= read -r line; do log_write WARN "tar: ${line}"; done)
+    perf_context="$(perf_archive_context "${archive_file}")"
+    perf_operation_start rootfs.create perf_started \
+        "source=$(printf '%q' "${source_root}") ${perf_context} access=source_read+archive_write"
+    if "${tar_command[@]}" 2> >(while IFS= read -r line; do log_write WARN "tar: ${line}"; done); then
+        status=0
+    else
+        status=$?
+    fi
+    perf_size="$(stat -c '%s' -- "${archive_file}" 2>/dev/null || true)"
+    perf_context="$(perf_archive_context "${archive_file}")"
+    perf_operation_end rootfs.create "${perf_started}" "${status}" \
+        "${perf_size}" compressed_output "${perf_context} access=source_read+archive_write"
+    (( status == 0 )) || return "${status}"
 }
 
 validate_rootfs() {
@@ -83,6 +95,7 @@ validate_rootfs() {
     local required_entry
     local generalization_entry_count
     local generalization_content expected_generalization_content
+    local perf_started perf_context perf_size status
     local -a read_options
     local required_entries=(
         ./etc/passwd
@@ -102,21 +115,45 @@ validate_rootfs() {
         ui_error "O rootfs gerado está vazio: ${archive_file}"
         return 1
     }
-    validate_archive_compression "${archive_file}" "${compression}" || {
+    perf_size="$(stat -c '%s' -- "${archive_file}" 2>/dev/null || true)"
+    perf_context="$(perf_archive_context "${archive_file}")"
+    perf_operation_start "rootfs.integrity.${compression}" perf_started \
+        "${perf_context} access=full_read+full_decompression"
+    if validate_archive_compression "${archive_file}" "${compression}"; then
+        status=0
+    else
+        status=$?
+    fi
+    perf_operation_end "rootfs.integrity.${compression}" "${perf_started}" "${status}" \
+        "${perf_size}" compressed_input "${perf_context} access=full_read+full_decompression"
+    (( status == 0 )) || {
         ui_error "Falha na integridade ${compression}: ${archive_file}"
         return 1
     }
 
     archive_tar_read_options "${compression}" read_options
-    listing="$(tar --list "${read_options[@]}" --file "${archive_file}")" || {
+    perf_operation_start rootfs.tar_listing.members perf_started \
+        "${perf_context} access=full_read+full_decompression"
+    if listing="$(tar --list "${read_options[@]}" --file "${archive_file}")"; then
+        status=0
+    else
+        status=$?
+    fi
+    perf_operation_end rootfs.tar_listing.members "${perf_started}" "${status}" \
+        "${perf_size}" compressed_input "${perf_context} access=full_read+full_decompression"
+    (( status == 0 )) || {
         ui_error "Falha ao listar o rootfs: ${archive_file}"
         return 1
     }
 
+    perf_operation_start rootfs.members.safety_and_exclusions perf_started \
+        "archive_listing=in_memory access=no_archive_read"
     while IFS= read -r entry; do
         if [[ "${entry}" == "${output_pattern}" ||
               "${entry}" == "${output_pattern}/"* ]]; then
             ui_error "O diretório de saída foi encontrado no archive: ${entry}"
+            perf_operation_end rootfs.members.safety_and_exclusions "${perf_started}" 1 \
+                "" none "archive_listing=in_memory access=no_archive_read"
             return 1
         fi
         case "${entry}" in
@@ -129,29 +166,55 @@ validate_rootfs() {
             ./var/cache/ocsinventory-agent/*|./var/log/ocsinventory-client|\
             ./var/log/ocsinventory-client/*)
                 ui_error "Conteúdo proibido encontrado no archive: ${entry}"
+                perf_operation_end rootfs.members.safety_and_exclusions "${perf_started}" 1 \
+                    "" none "archive_listing=in_memory access=no_archive_read"
                 return 1
                 ;;
         esac
     done <<< "${listing}"
+    perf_operation_end rootfs.members.safety_and_exclusions "${perf_started}" 0 \
+        "" none "archive_listing=in_memory access=no_archive_read"
 
+    perf_operation_start rootfs.members.required perf_started \
+        "archive_listing=in_memory access=no_archive_read"
     for required_entry in "${required_entries[@]}"; do
         grep -Fqx -- "${required_entry}" <<< "${listing}" || {
             ui_error "Entrada essencial ausente do rootfs: ${required_entry}"
+            perf_operation_end rootfs.members.required "${perf_started}" 1 \
+                "" none "archive_listing=in_memory access=no_archive_read"
             return 1
         }
     done
+    perf_operation_end rootfs.members.required "${perf_started}" 0 \
+        "" none "archive_listing=in_memory access=no_archive_read"
 
+    perf_operation_start rootfs.generalization.entry_count perf_started \
+        "archive_listing=in_memory access=no_archive_read"
     generalization_entry_count="$(grep -Fxc -- \
         './etc/systemd/system/ssh.service.d/10-pmjs-generate-host-keys.conf' \
         <<< "${listing}")"
     [[ "${generalization_entry_count}" -eq 1 ]] || {
         ui_error "O mecanismo de regeneração SSH deve aparecer exatamente uma vez no rootfs"
+        perf_operation_end rootfs.generalization.entry_count "${perf_started}" 1 \
+            "" none "archive_listing=in_memory access=no_archive_read"
         return 1
     }
+    perf_operation_end rootfs.generalization.entry_count "${perf_started}" 0 \
+        "" none "archive_listing=in_memory access=no_archive_read"
 
-    generalization_content="$(tar --extract --to-stdout "${read_options[@]}" \
+    perf_operation_start rootfs.generalization.content perf_started \
+        "${perf_context} access=full_read+full_decompression target_member=archive_tail"
+    if generalization_content="$(tar --extract --to-stdout "${read_options[@]}" \
         --file "${archive_file}" \
-        ./etc/systemd/system/ssh.service.d/10-pmjs-generate-host-keys.conf)" || {
+        ./etc/systemd/system/ssh.service.d/10-pmjs-generate-host-keys.conf)"; then
+        status=0
+    else
+        status=$?
+    fi
+    perf_operation_end rootfs.generalization.content "${perf_started}" "${status}" \
+        "${perf_size}" compressed_input \
+        "${perf_context} access=full_read+full_decompression target_member=archive_tail"
+    (( status == 0 )) || {
         ui_error "Falha ao ler o mecanismo de regeneração SSH do rootfs"
         return 1
     }
@@ -160,12 +223,20 @@ validate_rootfs() {
         'ExecStartPre=' \
         'ExecStartPre=/usr/bin/ssh-keygen -A' \
         'ExecStartPre=/usr/sbin/sshd -t')"
+    perf_operation_start rootfs.generalization.semantic_validation perf_started \
+        "extracted_member=in_memory access=no_archive_read"
     [[ "${generalization_content}" == "${expected_generalization_content}" ]] || {
         ui_error "Regeneração de host keys SSH ausente do rootfs"
+        perf_operation_end rootfs.generalization.semantic_validation "${perf_started}" 1 \
+            "" none "extracted_member=in_memory access=no_archive_read"
         return 1
     }
+    perf_operation_end rootfs.generalization.semantic_validation "${perf_started}" 0 \
+        "" none "extracted_member=in_memory access=no_archive_read"
 
-    tar --list "${read_options[@]}" --file "${archive_file}" >/dev/null
+    # A listagem capturada acima ja percorreu o tar ate EOF e teve seu status
+    # conferido. Todas as validacoes de nomes usam exatamente essa listagem;
+    # repetir tar --list aqui nao acrescentava uma propriedade nova.
     log_write INFO "Integridade e exclusões do rootfs validadas"
 }
 

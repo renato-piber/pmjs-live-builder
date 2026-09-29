@@ -51,6 +51,14 @@ disks_is_usb_or_removable() {
 }
 
 disks_is_protected() {
+    if declare -F log_perf_run >/dev/null; then
+        log_perf_run "disk protection predicate $1" disks_is_protected_impl "$@"
+    else
+        disks_is_protected_impl "$@"
+    fi
+}
+
+disks_is_protected_impl() {
     local disk="$1"
     local live_device=""
     local project_device=""
@@ -81,6 +89,14 @@ disks_is_protected() {
 }
 
 disks_collect_candidates() {
+    if declare -F log_perf_run >/dev/null; then
+        log_perf_run 'disk candidate enumeration' disks_collect_candidates_impl "$@"
+    else
+        disks_collect_candidates_impl "$@"
+    fi
+}
+
+disks_collect_candidates_impl() {
     local disk
     local type
 
@@ -177,6 +193,14 @@ disks_show_details() {
 }
 
 storage_detect_eduinstall_layout() {
+    if declare -F log_perf_run >/dev/null; then
+        log_perf_run 'EduInstall layout detection' storage_detect_eduinstall_layout_impl "$@"
+    else
+        storage_detect_eduinstall_layout_impl "$@"
+    fi
+}
+
+storage_detect_eduinstall_layout_impl() {
     local disk="${1:-${INSTALL_DISK:-}}"
     local -a partition_names=()
     local -a partition_sizes=()

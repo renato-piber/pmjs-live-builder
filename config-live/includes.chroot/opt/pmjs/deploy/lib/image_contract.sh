@@ -48,6 +48,14 @@ image_contract_fail() {
 }
 
 image_contract_parse_manifest() {
+    if [ "${IMAGE_CONTRACT_QUIET:-0}" != 1 ] && declare -F log_perf_run >/dev/null; then
+        log_perf_run manifest image_contract_parse_manifest_impl "$@"
+    else
+        image_contract_parse_manifest_impl "$@"
+    fi
+}
+
+image_contract_parse_manifest_impl() {
     local manifest_file="$1"
     local parsed_file=""
     local error_file=""
@@ -156,6 +164,14 @@ image_contract_validate_archive_file() {
 }
 
 image_contract_validate_checksum_manifest_coherence() {
+    if [ "${IMAGE_CONTRACT_QUIET:-0}" != 1 ] && declare -F log_perf_run >/dev/null; then
+        log_perf_run 'SHA256SUMS coherence (optional)' image_contract_validate_checksum_manifest_coherence_impl "$@"
+    else
+        image_contract_validate_checksum_manifest_coherence_impl "$@"
+    fi
+}
+
+image_contract_validate_checksum_manifest_coherence_impl() {
     local checksum_file="$1"
     local error_file=""
     local parser_error=""
@@ -202,6 +218,14 @@ PY
 }
 
 image_contract_verify_sha256() {
+    if [ "${IMAGE_CONTRACT_QUIET:-0}" != 1 ] && declare -F log_perf_run >/dev/null; then
+        log_perf_run "SHA256 $1" image_contract_verify_sha256_impl "$@"
+    else
+        image_contract_verify_sha256_impl "$@"
+    fi
+}
+
+image_contract_verify_sha256_impl() {
     local role="$1"
     local archive="$2"
     local expected="$3"
@@ -262,6 +286,14 @@ image_contract_probe_schema1() {
 }
 
 image_contract_load() {
+    if [ "${IMAGE_CONTRACT_QUIET:-0}" != 1 ] && declare -F log_perf_run >/dev/null; then
+        log_perf_run 'image contract load' image_contract_load_impl "$@"
+    else
+        image_contract_load_impl "$@"
+    fi
+}
+
+image_contract_load_impl() {
     local image_dir="$1"
     local storage_mode="${2:-clean}"
     local verify_hashes="${3:-1}"

@@ -105,6 +105,14 @@ extract_append_stderr_to_log() {
 }
 
 extract_resolve_archives() {
+    if declare -F log_perf_run >/dev/null; then
+        log_perf_run 'archive resolution / contract reuse' extract_resolve_archives_impl "$@"
+    else
+        extract_resolve_archives_impl "$@"
+    fi
+}
+
+extract_resolve_archives_impl() {
     local image_dir="${INSTALL_IMAGE_DIR:-}"
     local image_name="${INSTALL_IMAGE:-}"
 
@@ -133,10 +141,13 @@ extract_resolve_archives() {
     INSTALL_IMAGE_DIR=$(realpath -e -- "$image_dir") || return 1
     if [ "$IMAGE_CONTRACT_READY" -ne 1 ] ||
        [ "$IMAGE_CONTRACT_DIR" != "$INSTALL_IMAGE_DIR" ]; then
+        log_info "Contrato da imagem recarregado na extração: SHA256 será verificado novamente para schema 1."
         image_contract_load "$INSTALL_IMAGE_DIR" "${INSTALL_STORAGE_MODE:-clean}" 1 || {
             ui_error "Imagem inválida: ${IMAGE_CONTRACT_ERROR:-falha no contrato da imagem}"
             return 1
         }
+    else
+        log_info "Contrato da imagem já carregado nesta execução: resolução sem nova leitura de manifest/SHA256SUMS/SHA256."
     fi
 
     EXTRACT_ROOTFS_ARCHIVE="$IMAGE_CONTRACT_ROOTFS_ARCHIVE"
@@ -160,6 +171,7 @@ extract_archive_has_safe_paths() {
     local unsafe_entry=""
     local -a compression_options=()
     local entries_total=0 entries_done=0 started_tick=0 last_tick=-1 token="" started_wall=0
+    local read_perf_started="" names_perf_started="" read_status=0
 
     listing_file=$(mktemp /tmp/pmjs-tar-list.XXXXXX) || return 2
     error_file=$(mktemp /tmp/pmjs-tar-list-error.XXXXXX) || {
@@ -171,9 +183,18 @@ extract_archive_has_safe_paths() {
         rm -f "$listing_file" "$error_file"
         return 2
     }
-    if ! LC_ALL=C extract_run_archive "$archive" "Lendo estrutura $archive_label (safe-path)" \
+    if declare -F log_perf_now_ms >/dev/null; then read_perf_started=$(log_perf_now_ms); fi
+    if LC_ALL=C extract_run_archive "$archive" "Lendo estrutura $archive_label (safe-path)" \
         tar --list "${compression_options[@]}" --file "$archive" \
         > "$listing_file" 2> "$error_file"; then
+        read_status=0
+    else
+        read_status=$?
+    fi
+    if declare -F log_perf_end >/dev/null; then
+        log_perf_end "safe-path $archive_label leitura/listagem" "$read_perf_started" "$read_status" "archive=$archive"
+    fi
+    if [ "$read_status" -ne 0 ]; then
         log_error "Falha ao ler a estrutura tar/$compression de $archive_label: $archive"
         extract_append_stderr_to_log "Inspeção de $archive_label" "$error_file"
         rm -f "$listing_file" "$error_file"
@@ -182,6 +203,7 @@ extract_archive_has_safe_paths() {
     rm -f "$error_file"
 
     # Segunda leitura apenas do listing local gerado, nunca do archive.
+    if declare -F log_perf_now_ms >/dev/null; then names_perf_started=$(log_perf_now_ms); fi
     entries_total=$(wc -l < "$listing_file")
     started_tick=$SECONDS; started_wall=$(date +%s); token="${BASHPID}-${RANDOM}"
     if declare -F timer_progress_publish >/dev/null; then
@@ -221,6 +243,9 @@ extract_archive_has_safe_paths() {
     rm -f "$listing_file"
 
     if [ -n "$unsafe_entry" ]; then
+        if declare -F log_perf_end >/dev/null; then
+            log_perf_end "safe-path $archive_label nomes" "$names_perf_started" 1 "members=$entries_done/$entries_total"
+        fi
         if declare -F timer_progress_publish >/dev/null; then
             timer_progress_publish "$token" "Verificando nomes $archive_label" A "$entries_done" "$entries_total" "$(((SECONDS - started_tick) * 1000))" failed "$started_wall"
         fi
@@ -229,6 +254,9 @@ extract_archive_has_safe_paths() {
     fi
     if declare -F timer_progress_publish >/dev/null; then
         timer_progress_publish "$token" "Verificando nomes $archive_label" A "$entries_total" "$entries_total" "$(((SECONDS - started_tick) * 1000))" success "$started_wall"
+    fi
+    if declare -F log_perf_end >/dev/null; then
+        log_perf_end "safe-path $archive_label nomes" "$names_perf_started" 0 "members=$entries_done/$entries_total"
     fi
     return 0
 }
@@ -335,12 +363,22 @@ extract_preflight_archives() {
 }
 
 extract_validate() {
+    if declare -F log_perf_run >/dev/null; then
+        log_perf_run 'pre-extract validation' extract_validate_impl "$@"
+    else
+        extract_validate_impl "$@"
+    fi
+}
+
+extract_validate_impl() {
     local target_root="${INSTALL_TARGET_ROOT:-$INSTALL_TARGET_MOUNT}"
     local target_home="${INSTALL_TARGET_HOME:-$target_root/home}"
     local target_efi="${INSTALL_TARGET_EFI:-$target_root/boot/efi}"
     local source_root=""
     local source_home=""
     local source_efi=""
+    local guards_perf_started=""
+    if declare -F log_perf_now_ms >/dev/null; then guards_perf_started=$(log_perf_now_ms); fi
 
     if ! extract_is_dry_run; then
         if [ "${INSTALL_MOUNTS_READY:-0}" -ne 1 ]; then
@@ -433,6 +471,9 @@ extract_validate() {
         return 1
     fi
 
+    if declare -F log_perf_end >/dev/null; then
+        log_perf_end 'pre-extract target/mount guards' "$guards_perf_started" 0
+    fi
     if ! extract_resolve_archives; then
         return 1
     fi
@@ -493,6 +534,9 @@ extract_rootfs() {
     error_file=$(mktemp /tmp/pmjs-rootfs-extract-error.XXXXXX) || return 1
     extraction_start=$(date +%s)
     log_info "Iniciando extração do rootfs."
+    if declare -F log_perf_end >/dev/null; then
+        log_perf_end 'confirmation -> rootfs start' "${INSTALL_PERF_CONFIRM_MS:-}" 0 "archive=$EXTRACT_ROOTFS_ARCHIVE"
+    fi
     if extract_run_archive "$EXTRACT_ROOTFS_ARCHIVE" "Extraindo sistema (rootfs)" "${tar_command[@]}" >/dev/null 2>"$error_file"; then
         extraction_status=0
     else

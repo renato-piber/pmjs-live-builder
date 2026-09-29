@@ -157,9 +157,12 @@ Em terminal interativo, pergunta o sufixo/versão da nova imagem antes de montar
 destinos ou capturar arquivos. Aceita '0.3.0' ou 'pmjs-linux-0.3.0' (com o prefixo
 IMAGE_NAME configurado); Enter mantém o padrão de config/image.conf.
 Sem terminal interativo, mantém nome/versão da configuração, sem ler stdin.
-Em terminal e com destino NFS, também oferece a cópia para o Ventoy [S/n].
+Sem opções de destino e em terminal interativo, pergunta se a imagem deve ser
+publicada no NFS, diretamente no Ventoy ou em ambos. Ventoy e ambos sempre
+pedem o caminho da pasta pmjs-images já montada. Enter seleciona somente NFS.
 VENTOY_AUTOMOUNT_ENABLED=1 detecta/monta a mídia configurada automaticamente;
-com 0/ausente pede o caminho manual. O lançador da Live usa esse fluxo.
+esse automount continua disponível pelas opções CLI com valor auto. O lançador
+da Live usa o menu interativo e o caminho informado pelo operador.
 --also-ventoy-dir auto e --ventoy-dir auto habilitam descoberta explicitamente.
 
 Com --also-ventoy-dir, exige build NFS (automático ou --nfs-dir) e depois copia
@@ -259,6 +262,103 @@ select_interactive_ventoy_copy() {
         BUILD_VENTOY_COPY_SELECTED_INTERACTIVELY=true
         ui_info "Destinos selecionados: NFS + Ventoy (${BUILD_ALSO_VENTOY_DIR})"
         return 0
+    done
+}
+
+build_has_configured_nfs_destination() {
+    [[ -n "${BUILD_NFS_DIR}" ]] && return 0
+    case "${NFS_ENABLED:-0}" in
+        1) return 0 ;;
+        0) [[ -n "${NFS_IMAGES_DIR:-}" ]] ;;
+        *) return 1 ;;
+    esac
+}
+
+select_manual_ventoy_destination() {
+    local destination_kind=$1 requested_dir
+
+    check_ventoy_dependencies || return 1
+    ui_info "Informe a pasta pmjs-images da mídia Ventoy já montada; nenhum caminho será presumido."
+    while true; do
+        if ! read -r -p "Diretório pmjs-images do Ventoy: " requested_dir; then
+            ui_error "Seleção dos destinos cancelada; build não iniciado."
+            return 1
+        fi
+        if [[ -z "${requested_dir}" ]]; then
+            ui_error "O caminho do Ventoy é obrigatório; Ctrl+D cancela o build."
+            continue
+        fi
+        # Seleção continua sem efeitos: apenas confirma diretório, mount e
+        # identidade. Staging/mkdir/cópia só ocorrem após todos os preflights.
+        if ! validate_ventoy_sync_destination "${requested_dir}"; then
+            continue
+        fi
+        case "${destination_kind}" in
+            ventoy)
+                BUILD_VENTOY_DIR=${VENTOY_DESTINATION}
+                ui_info "Destino selecionado: somente Ventoy (${BUILD_VENTOY_DIR})"
+                ;;
+            both)
+                BUILD_ALSO_VENTOY_DIR=${VENTOY_DESTINATION}
+                BUILD_VENTOY_COPY_SELECTED_INTERACTIVELY=true
+                ui_info "Destinos selecionados: NFS + Ventoy (${BUILD_ALSO_VENTOY_DIR})"
+                ;;
+            *)
+                ui_error "Seleção interna de destino inválida: ${destination_kind}"
+                return 1
+                ;;
+        esac
+        return 0
+    done
+}
+
+select_interactive_build_destinations() {
+    local answer
+
+    [[ -t 0 ]] || return 0
+    # Qualquer destino Ventoy explícito já expressa toda a intenção do comando.
+    [[ -z "${BUILD_VENTOY_DIR}" && -z "${BUILD_ALSO_VENTOY_DIR}" ]] || return 0
+    # Preserva o comportamento histórico de --nfs-dir: ainda é possível pedir
+    # a cópia adicional; --also-ventoy-dir continua sendo a forma não interativa.
+    if [[ -n "${BUILD_NFS_DIR}" ]]; then
+        select_interactive_ventoy_copy
+        return $?
+    fi
+
+    while true; do
+        printf '\nOnde deseja publicar a nova imagem?\n'
+        printf '  1) Servidor NFS\n'
+        printf '  2) Ventoy\n'
+        printf '  3) NFS e Ventoy\n\n'
+        if ! read -r -p "Escolha [1]: " answer; then
+            ui_error "Seleção dos destinos cancelada; build não iniciado."
+            return 1
+        fi
+        case "${answer}" in
+            ''|1|n|N|nfs|NFS)
+                if ! build_has_configured_nfs_destination; then
+                    ui_error "Destino NFS não está configurado; escolha Ventoy ou configure o NFS."
+                    continue
+                fi
+                ui_info "Destino selecionado: somente NFS"
+                return 0
+                ;;
+            2|v|V|ventoy|Ventoy|VENTOY)
+                select_manual_ventoy_destination ventoy
+                return $?
+                ;;
+            3|a|A|ambos|Ambos|AMBOS)
+                if ! build_has_configured_nfs_destination; then
+                    ui_error "A opção ambos exige um destino NFS configurado."
+                    continue
+                fi
+                select_manual_ventoy_destination both
+                return $?
+                ;;
+            *)
+                ui_error "Opção inválida: escolha 1 (NFS), 2 (Ventoy) ou 3 (ambos)."
+                ;;
+        esac
     done
 }
 
@@ -448,12 +548,27 @@ build_rootfs_artifact() {
     local source_root=$1
     local build_dir=$2
     local rootfs_file=$3 compression=${4:-gzip} zstd_level=${5:-3}
-    local local_staging_parent=${6:-$build_dir} phase_start
+    local local_staging_parent=${6:-$build_dir} phase_start perf_started status
 
-    validate_generalization_source "${source_root}" || return 1
+    perf_operation_start rootfs.generalization.source_validation perf_started \
+        "source=$(printf '%q' "${source_root}") access=source_metadata"
+    if validate_generalization_source "${source_root}"; then status=0; else status=$?; fi
+    perf_operation_end rootfs.generalization.source_validation "${perf_started}" "${status}" \
+        "" none "source=$(printf '%q' "${source_root}") access=source_metadata"
+    (( status == 0 )) || return "${status}"
     GENERALIZATION_BUILD_DIR="${local_staging_parent}"
-    prepare_generalization_staging "${local_staging_parent}" GENERALIZATION_STAGING || return 1
-    validate_generalization_staging "${GENERALIZATION_STAGING}" || return 1
+    perf_operation_start rootfs.generalization.staging_prepare perf_started \
+        "staging_parent=$(printf '%q' "${local_staging_parent}") access=small_local_write"
+    if prepare_generalization_staging "${local_staging_parent}" GENERALIZATION_STAGING; then status=0; else status=$?; fi
+    perf_operation_end rootfs.generalization.staging_prepare "${perf_started}" "${status}" \
+        "" none "staging_parent=$(printf '%q' "${local_staging_parent}") access=small_local_write"
+    (( status == 0 )) || return "${status}"
+    perf_operation_start rootfs.generalization.staging_validation perf_started \
+        "staging=$(printf '%q' "${GENERALIZATION_STAGING}") access=small_local_metadata"
+    if validate_generalization_staging "${GENERALIZATION_STAGING}"; then status=0; else status=$?; fi
+    perf_operation_end rootfs.generalization.staging_validation "${perf_started}" "${status}" \
+        "" none "staging=$(printf '%q' "${GENERALIZATION_STAGING}") access=small_local_metadata"
+    (( status == 0 )) || return "${status}"
     log_write INFO "Staging de generalização: ${GENERALIZATION_STAGING}"
 
     ROOTFS_TEMP_FILE="${rootfs_file}.partial"
@@ -462,8 +577,13 @@ build_rootfs_artifact() {
         "${GENERALIZATION_STAGING}" "${compression}" "${zstd_level}" || return 1
     ROOTFS_GENERATE_SECONDS=$(( SECONDS - phase_start ))
     phase_start=${SECONDS}
-    validate_rootfs "${ROOTFS_TEMP_FILE}" "${source_root}" "${build_dir}" \
-        "${compression}" || return 1
+    perf_operation_start rootfs.validation.total perf_started \
+        "$(perf_archive_context "${ROOTFS_TEMP_FILE}")"
+    if validate_rootfs "${ROOTFS_TEMP_FILE}" "${source_root}" "${build_dir}" \
+        "${compression}"; then status=0; else status=$?; fi
+    perf_operation_end rootfs.validation.total "${perf_started}" "${status}" \
+        "" none "$(perf_archive_context "${ROOTFS_TEMP_FILE}")"
+    (( status == 0 )) || return "${status}"
     ROOTFS_VALIDATE_SECONDS=$(( SECONDS - phase_start ))
     mv -f -- "${ROOTFS_TEMP_FILE}" "${rootfs_file}" || return 1
     ROOTFS_TEMP_FILE=""
@@ -478,18 +598,33 @@ build_homefs_artifact() {
     local home_source=$1 home_user=$2 home_uid=$3 home_gid=$4
     local max_size_mib=$5 build_dir=$6 homefs_file=$7
     local compression=${8:-gzip} zstd_level=${9:-3} local_staging_parent=${10:-}
-    local phase_start
+    local phase_start perf_started status
     local -a standard_directories
 
-    detect_home_standard_directories "${home_source}" standard_directories || return 1
-    prepare_homefs_staging "${home_source}" "${home_user}" "${home_uid}" "${home_gid}" \
-        standard_directories HOMEFS_STAGING "${local_staging_parent}" || return 1
+    perf_operation_start homefs.source.directories perf_started \
+        "source=$(printf '%q' "${home_source}") access=source_metadata"
+    if detect_home_standard_directories "${home_source}" standard_directories; then status=0; else status=$?; fi
+    perf_operation_end homefs.source.directories "${perf_started}" "${status}" \
+        "" none "source=$(printf '%q' "${home_source}") access=source_metadata"
+    (( status == 0 )) || return "${status}"
+    perf_operation_start homefs.staging.prepare perf_started \
+        "source=$(printf '%q' "${home_source}") staging_parent=$(printf '%q' "${local_staging_parent}") access=source_read+local_write"
+    if prepare_homefs_staging "${home_source}" "${home_user}" "${home_uid}" "${home_gid}" \
+        standard_directories HOMEFS_STAGING "${local_staging_parent}"; then status=0; else status=$?; fi
+    perf_operation_end homefs.staging.prepare "${perf_started}" "${status}" \
+        "" none "source=$(printf '%q' "${home_source}") staging=$(printf '%q' "${HOMEFS_STAGING}") access=source_read+local_write"
+    (( status == 0 )) || return "${status}"
     HOMEFS_STAGING_PARENT="$(dirname -- "${HOMEFS_STAGING}")"
     log_write INFO "Staging do homefs: ${HOMEFS_STAGING}"
     log_write INFO "Filesystem do staging do homefs: $(stat --file-system --format='%T' -- "${HOMEFS_STAGING}")"
     log_write INFO "Archive final do homefs: ${homefs_file}"
-    validate_homefs_staging "${HOMEFS_STAGING}" "${home_user}" "${home_uid}" "${home_gid}" \
-        "${max_size_mib}" "${standard_directories[@]}" || return 1
+    perf_operation_start homefs.staging.validation perf_started \
+        "staging=$(printf '%q' "${HOMEFS_STAGING}") access=local_tree_scan"
+    if validate_homefs_staging "${HOMEFS_STAGING}" "${home_user}" "${home_uid}" "${home_gid}" \
+        "${max_size_mib}" "${standard_directories[@]}"; then status=0; else status=$?; fi
+    perf_operation_end homefs.staging.validation "${perf_started}" "${status}" \
+        "" none "staging=$(printf '%q' "${HOMEFS_STAGING}") access=local_tree_scan"
+    (( status == 0 )) || return "${status}"
 
     HOMEFS_TEMP_FILE="${homefs_file}.partial"
     phase_start=${SECONDS}
@@ -497,8 +632,13 @@ build_homefs_artifact() {
         "${compression}" "${zstd_level}" || return 1
     HOMEFS_GENERATE_SECONDS=$(( SECONDS - phase_start ))
     phase_start=${SECONDS}
-    validate_homefs_archive "${HOMEFS_TEMP_FILE}" "${home_user}" \
-        "${standard_directories[@]}" || return 1
+    perf_operation_start homefs.validation.total perf_started \
+        "$(perf_archive_context "${HOMEFS_TEMP_FILE}")"
+    if validate_homefs_archive "${HOMEFS_TEMP_FILE}" "${home_user}" \
+        "${standard_directories[@]}"; then status=0; else status=$?; fi
+    perf_operation_end homefs.validation.total "${perf_started}" "${status}" \
+        "" none "$(perf_archive_context "${HOMEFS_TEMP_FILE}")"
+    (( status == 0 )) || return "${status}"
     HOMEFS_VALIDATE_SECONDS=$(( SECONDS - phase_start ))
     mv -f -- "${HOMEFS_TEMP_FILE}" "${homefs_file}" || return 1
     HOMEFS_TEMP_FILE=""
@@ -511,21 +651,55 @@ build_homefs_artifact() {
 build_metadata_artifacts() {
     local build_dir=$1 rootfs_file=$2 homefs_file=$3 checksum_file=$4 manifest_file=$5
     local image_name=$6 image_version=$7 builder_version=$8 compression=$9 source_root=${10}
+    local root_hash home_hash rootfs_name homefs_name
 
     CHECKSUM_TEMP_FILE="${checksum_file}.partial"
     MANIFEST_TEMP_FILE="${manifest_file}.partial"
+    rootfs_name="$(basename -- "${rootfs_file}")"
+    homefs_name="$(basename -- "${homefs_file}")"
     generate_checksums "${build_dir}" "${rootfs_file}" "${homefs_file}" \
-        "${CHECKSUM_TEMP_FILE}" || return 1
-    validate_checksums "${build_dir}" "${CHECKSUM_TEMP_FILE}" || return 1
+        "${CHECKSUM_TEMP_FILE}" root_hash home_hash || return 1
+    # O primeiro hash e calculado lendo os archives depois de escritos. Ate a
+    # validacao final nao existe operacao legitima que os modifique; reutilizar
+    # esses digests evita tres releituras sem trocar o hash pos-escrita por um
+    # hash observado durante a geracao.
+    validate_checksums "${build_dir}" "${CHECKSUM_TEMP_FILE}" \
+        "${rootfs_name}" "${homefs_name}" "${root_hash}" "${home_hash}" || return 1
     generate_manifest "${MANIFEST_TEMP_FILE}" "${image_name}" "${image_version}" \
         "${builder_version}" "${compression}" "${rootfs_file}" "${homefs_file}" \
-        "${source_root}" || return 1
+        "${source_root}" "${root_hash}" "${home_hash}" || return 1
     validate_manifest "${MANIFEST_TEMP_FILE}" "${rootfs_file}" "${homefs_file}" \
-        "${compression}" || return 1
+        "${compression}" "${root_hash}" "${home_hash}" || return 1
     mv -f -- "${CHECKSUM_TEMP_FILE}" "${checksum_file}" || return 1
     CHECKSUM_TEMP_FILE=""
     mv -f -- "${MANIFEST_TEMP_FILE}" "${manifest_file}" || return 1
     MANIFEST_TEMP_FILE=""
+}
+
+derive_build_io_pass_counts() {
+    local includes_ventoy_copy=$1
+    local -n root_reads_ref=$2 root_decompressions_ref=$3
+    local -n home_reads_ref=$4 home_decompressions_ref=$5
+
+    case "${includes_ventoy_copy}" in
+        false)
+            root_reads_ref=7
+            root_decompressions_ref=5
+            home_reads_ref=6
+            home_decompressions_ref=4
+            ;;
+        true)
+            # Base NFS + validacao NFS + leitura rsync + validacao Ventoy.
+            root_reads_ref=14
+            root_decompressions_ref=9
+            home_reads_ref=13
+            home_decompressions_ref=8
+            ;;
+        *)
+            ui_error "Estado inválido ao calcular passes de I/O: ${includes_ventoy_copy}"
+            return 1
+            ;;
+    esac
 }
 
 main() {
@@ -534,6 +708,9 @@ main() {
     local elapsed rootfs_size homefs_size home_uid home_gid resolved_source_root
     local extension preparation_seconds metadata_seconds metadata_start builder_version
     local image_directory_name local_required_mib home_staging_estimate_mib parse_status=0
+    local perf_started perf_status
+    local rootfs_full_reads rootfs_full_decompressions
+    local homefs_full_reads homefs_full_decompressions
 
     ui_header
 
@@ -553,7 +730,7 @@ main() {
     validate_config
     select_build_image_version || return 1
     validate_config
-    select_interactive_ventoy_copy || return 1
+    select_interactive_build_destinations || return 1
     check_compression_dependency "${IMAGE_COMPRESSION}"
     load_builder_version "${version_file}" builder_version
     extension="$(archive_extension "${IMAGE_COMPRESSION}")"
@@ -620,7 +797,12 @@ main() {
     fi
 
     prepare_local_temporary_directory "${LOCAL_TEMP_DIR}" LOCAL_TEMP_DIR_RESOLVED || return 1
-    estimate_homefs_staging_size_mib "${HOME_SOURCE}" home_staging_estimate_mib || return 1
+    perf_operation_start homefs.source.size_estimate perf_started \
+        "source=$(printf '%q' "${HOME_SOURCE}") access=source_tree_scan"
+    if estimate_homefs_staging_size_mib "${HOME_SOURCE}" home_staging_estimate_mib; then perf_status=0; else perf_status=$?; fi
+    perf_operation_end homefs.source.size_estimate "${perf_started}" "${perf_status}" \
+        "" none "source=$(printf '%q' "${HOME_SOURCE}") access=source_tree_scan estimate_mib=${home_staging_estimate_mib:-unknown}"
+    (( perf_status == 0 )) || return "${perf_status}"
     (( home_staging_estimate_mib <= HOMEFS_MAX_SIZE_MIB )) || {
         ui_error "Conteúdo selecionado da home excede HOMEFS_MAX_SIZE_MIB: ${home_staging_estimate_mib} MiB"
         return 1
@@ -664,12 +846,22 @@ main() {
     check_active_build_destination "durante a geração do homefs" || return 1
 
     metadata_start=${SECONDS}
-    build_metadata_artifacts "${BUILD_DIR}" "${ROOTFS_FILE}" "${HOMEFS_FILE}" \
+    perf_operation_start metadata.total perf_started \
+        "$(perf_archives_context "${ROOTFS_FILE}" "${HOMEFS_FILE}")"
+    if build_metadata_artifacts "${BUILD_DIR}" "${ROOTFS_FILE}" "${HOMEFS_FILE}" \
         "${CHECKSUM_FILE}" "${MANIFEST_FILE}" "${IMAGE_NAME}" "${IMAGE_VERSION}" \
-        "${builder_version}" "${IMAGE_COMPRESSION}" "${SOURCE_ROOT}" || return 1
+        "${builder_version}" "${IMAGE_COMPRESSION}" "${SOURCE_ROOT}"; then perf_status=0; else perf_status=$?; fi
+    perf_operation_end metadata.total "${perf_started}" "${perf_status}" \
+        "" none "$(perf_archives_context "${ROOTFS_FILE}" "${HOMEFS_FILE}")"
+    (( perf_status == 0 )) || return "${perf_status}"
     metadata_seconds=$(( SECONDS - metadata_start ))
 
-    validate_image_directory "${BUILD_DIR}" || return 1
+    perf_operation_start bundle.validation.precommit perf_started \
+        "directory=$(printf '%q' "${BUILD_DIR}")"
+    if validate_image_directory "${BUILD_DIR}"; then perf_status=0; else perf_status=$?; fi
+    perf_operation_end bundle.validation.precommit "${perf_started}" "${perf_status}" \
+        "" none "directory=$(printf '%q' "${BUILD_DIR}")"
+    (( perf_status == 0 )) || return "${perf_status}"
     check_active_build_destination "antes da publicação final" || return 1
 
     cleanup_detected_capture_source || return 1
@@ -677,25 +869,40 @@ main() {
     rootfs_size="$(format_file_size "${ROOTFS_FILE}")"
     homefs_size="$(format_file_size "${HOMEFS_FILE}")"
     check_active_build_destination "imediatamente antes do commit" || return 1
-    finalize_build_workspace "${BUILD_WORKSPACE}" "${LOCAL_IMAGE_DIR}" || return 1
+    perf_operation_start publication.commit.total perf_started \
+        "staging=$(printf '%q' "${BUILD_WORKSPACE}") final=$(printf '%q' "${LOCAL_IMAGE_DIR}")"
+    if finalize_build_workspace "${BUILD_WORKSPACE}" "${LOCAL_IMAGE_DIR}"; then perf_status=0; else perf_status=$?; fi
+    perf_operation_end publication.commit.total "${perf_started}" "${perf_status}" \
+        "" none "final=$(printf '%q' "${LOCAL_IMAGE_DIR}")"
+    (( perf_status == 0 )) || return "${perf_status}"
     check_active_build_destination "durante a publicação final" || return 1
     BUILD_WORKSPACE=""
     BUILD_SUCCEEDED=true
 
     log_write SUCCESS "Imagem ${BUILD_DESTINATION_KIND} publicada após validação completa: ${LOCAL_IMAGE_DIR}"
     copy_built_image_to_ventoy || return 1
+    if [[ -n "${BUILD_ALSO_VENTOY_DIR}" ]]; then
+        derive_build_io_pass_counts true rootfs_full_reads rootfs_full_decompressions \
+            homefs_full_reads homefs_full_decompressions || return 1
+    else
+        derive_build_io_pass_counts false rootfs_full_reads rootfs_full_decompressions \
+            homefs_full_reads homefs_full_decompressions || return 1
+    fi
     elapsed="$(( SECONDS - START_TIME ))"
     log_write INFO "Tamanho rootfs: ${rootfs_size}; tamanho homefs: ${homefs_size}"
     log_write INFO "Tempos: preparação=${preparation_seconds}s; rootfs_geração=${ROOTFS_GENERATE_SECONDS}s; rootfs_validação=${ROOTFS_VALIDATE_SECONDS}s; homefs_geração=${HOMEFS_GENERATE_SECONDS}s; homefs_validação=${HOMEFS_VALIDATE_SECONDS}s; metadata=${metadata_seconds}s; total=${elapsed}s"
+    log_write INFO "Passes I/O: rootfs_full_reads=${rootfs_full_reads}; rootfs_full_decompressions=${rootfs_full_decompressions}; homefs_full_reads=${homefs_full_reads}; homefs_full_decompressions=${homefs_full_decompressions}"
     ui_success "Build concluído"
-    printf 'Rootfs: %s (%s)\nHomefs: %s (%s)\nTempos do build:\n  Preparação: %ss\n  Rootfs: %ss (geração %ss, validação %ss)\n  Homefs: %ss (geração %ss, validação %ss)\n  Metadata: %ss\n  Total: %ss\nLog: %s\n' \
+    printf 'Rootfs: %s (%s)\nHomefs: %s (%s)\nTempos do build:\n  Preparação: %ss\n  Rootfs: %ss (geração %ss, validação %ss)\n  Homefs: %ss (geração %ss, validação %ss)\n  Metadata: %ss\n  Total: %ss\nPasses completos:\n  rootfs_full_reads=%s\n  rootfs_full_decompressions=%s\n  homefs_full_reads=%s\n  homefs_full_decompressions=%s\nLog: %s\n' \
         "${LOCAL_IMAGE_DIR}/${ROOTFS_FILENAME}" "${rootfs_size}" \
         "${LOCAL_IMAGE_DIR}/${HOMEFS_FILENAME}" "${homefs_size}" \
         "${preparation_seconds}" "$(( ROOTFS_GENERATE_SECONDS + ROOTFS_VALIDATE_SECONDS ))" \
         "${ROOTFS_GENERATE_SECONDS}" "${ROOTFS_VALIDATE_SECONDS}" \
         "$(( HOMEFS_GENERATE_SECONDS + HOMEFS_VALIDATE_SECONDS ))" \
         "${HOMEFS_GENERATE_SECONDS}" "${HOMEFS_VALIDATE_SECONDS}" \
-        "${metadata_seconds}" "${elapsed}" "${LOG_FILE}"
+        "${metadata_seconds}" "${elapsed}" \
+        "${rootfs_full_reads}" "${rootfs_full_decompressions}" \
+        "${homefs_full_reads}" "${homefs_full_decompressions}" "${LOG_FILE}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

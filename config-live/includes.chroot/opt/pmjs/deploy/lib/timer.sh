@@ -369,7 +369,8 @@ timer_archive_run() {
         "$@" < "$archive"
         return $?
     fi
-    python3 - "$archive" "$label" "$kind" "$state" "${TIMER_ETA_WORKSPACE:-}" "${TIMER_CURRENT_STEP:-}" "$@" <<'PY' || status=$?
+    python3 - "$archive" "$label" "$kind" "$state" "${TIMER_ETA_WORKSPACE:-}" "${TIMER_CURRENT_STEP:-}" \
+        "${LOG_FILE:-}" "${INSTALL_PERF_PHASE:-unspecified}" "${INSTALL_EXECUTION_MODE:-unspecified}" "$@" <<'PY' || status=$?
 import os
 import signal
 import stat
@@ -379,7 +380,7 @@ import tempfile
 import time
 import uuid
 
-archive, label, kind, state, eta_workspace, eta_step, *command = sys.argv[1:]
+archive, label, kind, state, eta_workspace, eta_step, log_path, interval, mode, *command = sys.argv[1:]
 token = uuid.uuid4().hex
 label = label.replace('|', '-').replace('\n', ' ')
 started_wall = int(time.time())
@@ -387,6 +388,24 @@ started = time.monotonic()
 child = None
 pending_signal = 0
 metric_available = True
+info = None
+
+def perf_archive(event, done, total, status):
+    if not log_path:
+        return
+    try:
+        safe_archive = os.path.basename(archive).replace('\n', ' ').replace('|', '-')
+        elapsed = time.monotonic() - started
+        identity = f'dev={info.st_dev} inode={info.st_ino}' if info is not None else 'object=unavailable'
+        record = (f'{time.strftime("%Y-%m-%d %H:%M:%S")} [PERF] archive-pass {event} {label}: '
+                  f'{elapsed:.3f}s status={status} phase={eta_step or "none"} interval={interval} mode={mode} '
+                  f'archive={safe_archive} bytes={done}/{total} metric={"offset" if metric_available else "unavailable"} '
+                  f'{identity} token={token}\n')
+        fd = os.open(log_path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'w') as output:
+            output.write(record)
+    except (OSError, ValueError):
+        pass # A medição nunca altera o consumidor, stdout ou status.
 
 def interrupted(signum, frame):
     global pending_signal
@@ -447,6 +466,7 @@ try:
         total = info.st_size
         publish(0, total, 'running')
         child = subprocess.Popen(command, stdin=source, start_new_session=True)
+        perf_archive('start', 0, total, 'running')
         if pending_signal:
             interrupted(pending_signal, None)
         while child.poll() is None:
@@ -469,7 +489,9 @@ try:
                 os.killpg(child.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        publish(position(fd, total), total,
+        consumed = position(fd, total)
+        perf_archive('end', consumed, total, status)
+        publish(consumed, total,
                 'success' if status == 0 else 'failed')
         sys.exit(status)
 except (OSError, ValueError) as error:
@@ -480,6 +502,7 @@ except (OSError, ValueError) as error:
             pass
         child.wait()
     print(f'Falha no consumidor do archive: {error}', file=sys.stderr)
+    perf_archive('end', 0, 0, 1)
     publish(0, 0, 'failed')
     sys.exit(1)
 PY
@@ -792,10 +815,13 @@ timer_run_step() {
     local step_id="$1"
     local label="$2"
     local status=0
+    local step_perf_started=""
     shift 2
 
     timer_step_start "$step_id" "$label"
+    if declare -F log_perf_now_ms >/dev/null; then step_perf_started=$(log_perf_now_ms); fi
     "$@" || status=$?
+    if declare -F log_perf_end >/dev/null; then log_perf_end "step $step_id ($label)" "$step_perf_started" "$status"; fi
     timer_step_stop "$step_id" || true
     if [ -n "${TIMER_ETA_WORKSPACE:-}" ]; then
         printf '%s|%s\n' "$step_id" "$((${TIMER_STEP_DURATIONS[$step_id]:-0} * 1000))" >> "$TIMER_ETA_WORKSPACE/steps" 2>/dev/null || true

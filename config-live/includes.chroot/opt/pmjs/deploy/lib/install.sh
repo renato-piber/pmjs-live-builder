@@ -221,6 +221,8 @@ install_confirm_destructive() {
 }
 
 install_start() {
+    INSTALL_PERF_PHASE=before-confirmation
+    INSTALL_PERF_CONFIRM_MS=""
     INSTALL_DESTRUCTIVE_STARTED=0
     image_contract_reset
     timer_reset
@@ -329,6 +331,8 @@ install_start() {
         ui_pause
         return
     fi
+    INSTALL_PERF_PHASE=after-confirmation
+    if declare -F log_perf_now_ms >/dev/null; then INSTALL_PERF_CONFIRM_MS=$(log_perf_now_ms); fi
     timer_live_start || true
 
     if ! timer_run_step "partitioning" "Particionamento" partitions_apply_plan; then

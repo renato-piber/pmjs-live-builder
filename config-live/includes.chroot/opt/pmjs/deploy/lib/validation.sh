@@ -113,6 +113,14 @@ validate_image() {
 }
 
 validate_disk() {
+    if declare -F log_perf_run >/dev/null; then
+        log_perf_run 'disk validation' validate_disk_impl "$@"
+    else
+        validate_disk_impl "$@"
+    fi
+}
+
+validate_disk_impl() {
     local disk="${INSTALL_DISK:-}"
     local disk_type
     local size_bytes
